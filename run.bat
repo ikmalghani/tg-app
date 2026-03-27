@@ -1,7 +1,6 @@
 @echo off
-setlocal
 
-cd /d C:\Users\malnitro5\Documents\Tools\tg-app\tg-upload
+cd tg-upload
 call venv\Scripts\activate.bat
-cd /d C:\Users\malnitro5\Documents\Tools\tg-app
+cd ..
 python tg-app.py
