@@ -1,0 +1,11 @@
+# Steps to create this configuration:
+# 1. Create a crypt remote named "crypt" using rclone 
+# 2. Copy password and password2 from rclone.conf to this file
+
+[crypt]
+type = crypt
+remote = .
+filename_encryption = off
+directory_name_encryption = false
+password = 
+password2 = 

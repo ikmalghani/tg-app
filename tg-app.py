@@ -1,10 +1,14 @@
 import importlib
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import time
 import tkinter as tk
 from tkinter import filedialog
 from tkinter import messagebox
+import platform
 
 def _load_env_file(env_path):
     if not os.path.exists(env_path):
@@ -24,6 +28,7 @@ def _load_env_file(env_path):
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "tg-upload")
+CRYPT_CONFIG_NAME = "crypt.conf"
 
 _load_env_file(os.path.join(BASE_DIR, ".env"))
 
@@ -101,6 +106,166 @@ def get_pyrogram_client():
         )
         return None
     return pyrogram.Client
+
+def get_resource_path(filename):
+    """Get the correct path to a resource file, works for both dev and PyInstaller."""
+    if getattr(sys, "frozen", False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = BASE_DIR
+    return os.path.join(base_path, filename)
+
+def get_crypt_config_path():
+    return get_resource_path(CRYPT_CONFIG_NAME)
+
+def log_message(message):
+    print(message)
+
+def run_subprocess(command_args, working_directory=None):
+    kwargs = {
+        "cwd": working_directory,
+        "capture_output": True,
+        "text": True,
+    }
+    if platform.system() == "Windows":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return subprocess.run(command_args, **kwargs)
+
+def get_tg_upload_python():
+    if platform.system() == "Windows":
+        venv_python = os.path.join(UPLOAD_DIR, "venv", "Scripts", "python.exe")
+    else:
+        venv_python = os.path.join(UPLOAD_DIR, "venv", "bin", "python")
+    if os.path.exists(venv_python):
+        return venv_python
+    return sys.executable
+
+def run_tg_upload(arguments):
+    command_args = [get_tg_upload_python(), "tg-upload.py", *arguments]
+    result = run_subprocess(command_args, working_directory=UPLOAD_DIR)
+    if result.returncode != 0:
+        stderr = result.stderr.strip() if result.stderr else "tg-upload command failed."
+        raise RuntimeError(stderr)
+    return result
+
+def show_copyable_error(title, message):
+    dialog = tk.Toplevel(root)
+    dialog.title(title)
+    dialog.transient(root)
+    dialog.grab_set()
+    dialog.geometry("760x320")
+
+    text = tk.Text(dialog, wrap=tk.WORD)
+    text.insert("1.0", message)
+    text.configure(state=tk.NORMAL)
+    text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+    button_frame = tk.Frame(dialog)
+    button_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+    def copy_all():
+        dialog.clipboard_clear()
+        dialog.clipboard_append(text.get("1.0", tk.END).rstrip())
+        dialog.update()
+
+    tk.Button(button_frame, text="Copy", command=copy_all).pack(side=tk.LEFT)
+    tk.Button(button_frame, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+
+    text.focus_set()
+
+def encrypt_decrypt(is_encrypt, file_or_folders, config_file_path):
+    if not os.path.exists(config_file_path):
+        raise FileNotFoundError(f"Config file not found at {config_file_path}")
+
+    log_message(f"Using config file: {config_file_path}")
+
+    for file_or_folder in file_or_folders:
+        if not file_or_folder:
+            continue
+
+        normalized_path = os.path.abspath(file_or_folder)
+        file_directory = os.path.dirname(normalized_path) or BASE_DIR
+        basename = os.path.basename(normalized_path)
+
+        if os.path.isfile(normalized_path):
+            if is_encrypt:
+                if basename.lower().endswith(".bin"):
+                    log_message(f"SKIPPED: {basename} - File already encrypted (.bin extension detected)")
+                    continue
+                log_message(f"Processing: {basename} - File will be encrypted")
+                command_args = [
+                    "rclone",
+                    "--config",
+                    config_file_path,
+                    "move",
+                    normalized_path,
+                    "crypt:.",
+                ]
+            else:
+                remote_name = basename[:-4] if basename.lower().endswith(".bin") else basename
+                command_args = [
+                    "rclone",
+                    "--config",
+                    config_file_path,
+                    "move",
+                    f"crypt:{remote_name}",
+                    ".",
+                ]
+        elif os.path.isdir(normalized_path):
+            if is_encrypt:
+                command_args = [
+                    "rclone",
+                    "--config",
+                    config_file_path,
+                    "move",
+                    normalized_path,
+                    "crypt:.",
+                    "--transfers",
+                    "1",
+                ]
+            else:
+                command_args = [
+                    "rclone",
+                    "--config",
+                    config_file_path,
+                    "move",
+                    "crypt:",
+                    normalized_path,
+                    "--transfers",
+                    "1",
+                ]
+        else:
+            raise FileNotFoundError(f"Invalid file or folder path: {file_or_folder}")
+
+        log_message(f"Executing command: {' '.join(command_args)}")
+        result = run_subprocess(command_args, working_directory=file_directory)
+        if result.stdout:
+            log_message(result.stdout.strip())
+        if result.stderr:
+            log_message(result.stderr.strip())
+        if result.returncode != 0:
+            action = "encrypt" if is_encrypt else "decrypt"
+            raise RuntimeError(f"Failed to {action} {basename or normalized_path}")
+        time.sleep(1)
+
+def get_encrypted_output_path(file_path):
+    return f"{file_path}.bin"
+
+def encrypt_file_for_upload(file_path, config_file_path):
+    encrypt_decrypt(True, [file_path], config_file_path)
+    encrypted_path = get_encrypted_output_path(file_path)
+    if not os.path.exists(encrypted_path):
+        raise FileNotFoundError(f"Encrypted file not found after encryption: {encrypted_path}")
+    return encrypted_path
+
+def decrypt_files_in_directory(directory, config_file_path):
+    decrypted_any = False
+    for entry in sorted(os.listdir(directory)):
+        file_path = os.path.join(directory, entry)
+        if os.path.isfile(file_path) and entry.lower().endswith(".bin"):
+            encrypt_decrypt(False, [file_path], config_file_path)
+            decrypted_any = True
+    return decrypted_any
 
 # Split function from split.py
 def split_file(file_path, split_size=1500 * 1024 * 1024):
@@ -390,12 +555,17 @@ def is_allowed_file(filename):
 
 # Function to authorize
 def authorize():
-    target_directory = UPLOAD_DIR
-    if os.getcwd() != target_directory:
-        os.chdir(target_directory)
-    
-    command = f'python tg-upload.py --profile profile --api_id {API_ID} --api_hash {API_HASH} --bot {BOT_TOKEN} --login_only'
-    os.system(command)
+    try:
+        run_tg_upload([
+            "--profile", "profile",
+            "--api_id", API_ID,
+            "--api_hash", API_HASH,
+            "--bot", BOT_TOKEN,
+            "--login_only",
+        ])
+    except Exception as exc:
+        show_copyable_error("Authorize Error", str(exc))
+        return
     messagebox.showinfo("Info", "Authorization complete.")
 
 # Removed browse_txt_file function - using text field instead
@@ -403,7 +573,7 @@ def authorize():
 def browse_upload():
     source_type = var_source_type_upload.get()
     if source_type == "File":
-        file_path = filedialog.askopenfilename(filetypes=[("Binary files", "*.bin"), ("Part files", "*.part*")])
+        file_path = filedialog.askopenfilename()
         if file_path:
             entry_upload_path.delete(0, tk.END)
             entry_upload_path.insert(0, file_path)
@@ -419,10 +589,6 @@ def browse_download_directory():
     entry_download_dir.insert(0, download_directory)
 
 def download():
-    target_directory = UPLOAD_DIR
-    if os.getcwd() != target_directory:
-        os.chdir(target_directory)
-
     channel = var_channel.get()
     if channel == "Custom Channel":
         chat_id = entry_custom_chat_id.get()
@@ -431,6 +597,7 @@ def download():
 
     directory = entry_download_dir.get()
     combine = var_combine.get()
+    decrypt_after_download = var_decrypt_download.get()
 
     # Get links from text widget (one per line)
     links_text = text_tg_links.get("1.0", tk.END).strip()
@@ -445,20 +612,24 @@ def download():
         messagebox.showerror("Error", "Please enter at least one Telegram link.")
         return
 
-    command = f'python tg-upload.py --profile profile --chat_id {chat_id} --dl_dir "{directory}"'
+    command_args = ["--profile", "profile", "--chat_id", str(chat_id), "--dl_dir", directory]
 
     # Auto-detect: 1 link = Single, multiple links = Batch
     if len(links_list) == 1:
         # Single mode
-        command += f' --dl --links "{links_list[0]}"'
+        command_args.extend(["--dl", "--links", links_list[0]])
     else:
         # Batch mode - create temporary file with links
         temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', prefix='tg_links_')
         temp_file.write('\n'.join(links_list))
         temp_file.close()
-        command += f' --dl --txt_file "{temp_file.name}"'
+        command_args.extend(["--dl", "--txt_file", temp_file.name])
 
-    os.system(command)
+    try:
+        run_tg_upload(command_args)
+    except Exception as exc:
+        show_copyable_error("Download Error", str(exc))
+        return
     
     # Combine files after download if requested
     if combine and directory:
@@ -467,6 +638,10 @@ def download():
         # If not combining, rename files using captions
         if directory and links_list:
             rename_files_with_captions(directory, links_list)
+
+    if decrypt_after_download and directory:
+        config_file_path = get_crypt_config_path()
+        decrypt_files_in_directory(directory, config_file_path)
     
     messagebox.showinfo("Info", "Download complete.")
 
@@ -476,10 +651,6 @@ def browse_upload_directory():
     entry_upload_path.insert(0, upload_directory)
 
 def upload():
-    target_directory = UPLOAD_DIR
-    if os.getcwd() != target_directory:
-        os.chdir(target_directory)
-
     channel = var_channel_upload.get()
     if channel == "Custom Channel":
         chat_id = entry_custom_chat_id_upload.get()
@@ -489,21 +660,54 @@ def upload():
     source_type = var_source_type_upload.get()
     delete_on_done = var_delete_on_done.get()
     split_files = var_split.get()
+    encrypt_before_upload = var_encrypt_upload.get()
+    config_file_path = get_crypt_config_path()
 
     files = []
     if source_type == "File":
         file_path = entry_upload_path.get()
-        if file_path and is_allowed_file(os.path.basename(file_path)):
+        if file_path and os.path.isfile(file_path):
             files = [file_path]
     else:
         folder_path = entry_upload_path.get()
         if folder_path:
-            files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f)) and is_allowed_file(f)]
+            files = [
+                os.path.join(folder_path, f)
+                for f in os.listdir(folder_path)
+                if os.path.isfile(os.path.join(folder_path, f))
+            ]
 
-    # Split files before upload if needed
+    if not files:
+        messagebox.showerror("Error", "Please choose at least one valid file to upload.")
+        return
+
+    prepared_files = []
+    try:
+        if encrypt_before_upload:
+            if not os.path.exists(config_file_path):
+                messagebox.showerror("Error", f"Config file not found: {config_file_path}")
+                return
+            for file_path in files:
+                if os.path.basename(file_path).lower().endswith(".bin"):
+                    prepared_files.append(file_path)
+                else:
+                    prepared_files.append(encrypt_file_for_upload(file_path, config_file_path))
+        else:
+            prepared_files = list(files)
+    except Exception as exc:
+        messagebox.showerror("Encryption Error", str(exc))
+        return
+
+    # Split files after encryption if needed
     files_to_upload = []
     min_split_size = 2 * 1024 * 1024 * 1024  # 2GB in bytes
-    for file_path in files:
+    original_sources_to_delete = set()
+    generated_files_to_delete = set()
+    for original_file in files:
+        if delete_on_done:
+            original_sources_to_delete.add(original_file)
+
+    for file_path in prepared_files:
         # Skip if already a part file
         if ".part" in os.path.basename(file_path):
             files_to_upload.append(file_path)
@@ -514,22 +718,39 @@ def upload():
                 # Split the file
                 part_files = split_file(file_path, split_size=1500 * 1024 * 1024)
                 files_to_upload.extend(part_files)
-                # Delete original file if delete_on_done is enabled
-                if delete_on_done:
-                    os.remove(file_path)
+                generated_files_to_delete.update(part_files)
+                generated_files_to_delete.add(file_path)
             else:
                 # File is smaller than 2GB, upload as-is
                 files_to_upload.append(file_path)
+                if delete_on_done and file_path not in original_sources_to_delete:
+                    generated_files_to_delete.add(file_path)
         else:
             files_to_upload.append(file_path)
+            if delete_on_done and file_path not in original_sources_to_delete:
+                generated_files_to_delete.add(file_path)
 
     # Upload all files (including split parts)
     for file_path in files_to_upload:
         filename = os.path.basename(file_path)
-        command = f'python tg-upload.py --profile profile --path "{file_path}" --chat_id {chat_id} --caption "{filename}"'
-        if delete_on_done:
-            command += ' --delete_on_done'
-        os.system(command)
+        try:
+            run_tg_upload([
+                "--profile", "profile",
+                "--path", file_path,
+                "--chat_id", str(chat_id),
+                "--caption", filename,
+            ])
+        except Exception as exc:
+            show_copyable_error("Upload Error", str(exc))
+            return
+
+    if delete_on_done:
+        for file_path in sorted(original_sources_to_delete | generated_files_to_delete):
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
     messagebox.showinfo("Info", "Upload complete.")
 
 # Create the main window
@@ -582,6 +803,10 @@ text_tg_links.config(yscrollcommand=scrollbar_tg_links.set)
 var_combine = tk.BooleanVar(value=False)
 check_combine = tk.Checkbutton(frame_download, text="Combine", variable=var_combine)
 check_combine.grid(row=3, column=0, padx=5, pady=5)
+
+var_decrypt_download = tk.BooleanVar(value=True)
+check_decrypt_download = tk.Checkbutton(frame_download, text="Decrypt", variable=var_decrypt_download)
+check_decrypt_download.grid(row=3, column=1, padx=5, pady=5)
 
 label_download_dir = tk.Label(frame_download, text="Save to...")
 label_download_dir.grid(row=4, column=0, padx=5, pady=5)
@@ -641,6 +866,10 @@ check_delete_on_done.grid(row=3, column=0, padx=5, pady=5)
 var_split = tk.BooleanVar(value=False)
 check_split = tk.Checkbutton(frame_upload, text="Split Files (1.5GB)", variable=var_split)
 check_split.grid(row=3, column=1, padx=5, pady=5)
+
+var_encrypt_upload = tk.BooleanVar(value=True)
+check_encrypt_upload = tk.Checkbutton(frame_upload, text="Encrypt", variable=var_encrypt_upload)
+check_encrypt_upload.grid(row=3, column=2, padx=5, pady=5)
 
 button_upload = tk.Button(frame_upload, text="Upload", command=upload)
 button_upload.grid(row=7, column=1, padx=5, pady=5)
