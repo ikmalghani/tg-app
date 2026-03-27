@@ -1,5 +1,6 @@
 import importlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -142,7 +143,12 @@ def get_tg_upload_python():
 
 def run_tg_upload(arguments):
     command_args = [get_tg_upload_python(), "tg-upload.py", *arguments]
+    log_message(f"Executing command: {' '.join(command_args)}")
     result = run_subprocess(command_args, working_directory=UPLOAD_DIR)
+    if result.stdout:
+        log_message(result.stdout.strip())
+    if result.stderr:
+        log_message(result.stderr.strip())
     if result.returncode != 0:
         stderr = result.stderr.strip() if result.stderr else "tg-upload command failed."
         raise RuntimeError(stderr)
@@ -271,15 +277,21 @@ def decrypt_files_in_directory(directory, config_file_path):
 def split_file(file_path, split_size=1500 * 1024 * 1024):
     file_size = os.path.getsize(file_path)
     num_parts = -(-file_size // split_size)  # Ceiling division
+    log_message(
+        f"Processing: {os.path.basename(file_path)} - Splitting file into {num_parts} part(s) "
+        f"with chunk size {split_size} bytes"
+    )
 
     part_files = []
     with open(file_path, 'rb') as f:
         for i in range(num_parts):
             part_file_name = f"{file_path}.part{i:02d}"
+            log_message(f"Processing: {os.path.basename(file_path)} - Creating split part {os.path.basename(part_file_name)}")
             with open(part_file_name, 'wb') as part_file:
                 part_file.write(f.read(split_size))
             part_files.append(part_file_name)
 
+    log_message(f"Completed: {os.path.basename(file_path)} - Created {len(part_files)} split part(s)")
     return part_files
 
 # Helper function to parse Telegram link and extract chat_id and message_id
@@ -362,115 +374,62 @@ def get_caption_from_link(link):
 
 # Combine function from combine.py
 def combine_files(directory, links_list=None):
-    # Get captions from all links
-    captions = []
-    if links_list:
-        for link in links_list:
-            caption = get_caption_from_link(link)
-            if caption:
-                captions.append(caption)
-    
-    for root, dirs, files in os.walk(directory):
-        part_prefixes = set()
-        part_prefix_to_files = {}
-        
-        for file_name in files:
-            if ".part" in file_name:
-                # Extract base filename by removing .partXX
-                part_prefix = file_name.split(".part")[0]
-                part_prefixes.add(part_prefix)
-                if part_prefix not in part_prefix_to_files:
-                    part_prefix_to_files[part_prefix] = []
-                part_prefix_to_files[part_prefix].append(file_name)
+    if not directory or not os.path.exists(directory) or not links_list:
+        log_message("SKIPPED: Combine - Missing download directory, directory does not exist, or no links were provided")
+        return
 
-        # Try to match part prefixes to captions
-        used_captions = set()
-        for part_prefix in part_prefixes:
-            part_files = part_prefix_to_files[part_prefix]
-            
-            # Sort by the part number to ensure correct order
-            def get_part_number(fname):
-                try:
-                    part_str = fname.split(".part")[1]
-                    return int(part_str)
-                except (ValueError, IndexError):
-                    return 0
-            part_files = sorted(part_files, key=get_part_number)
-            
-            if len(part_files) > 1:  # Ensure there are multiple parts
-                # Try to find a matching caption
-                final_filename = None
-                
-                # Normalize part_prefix for comparison
-                # Remove .bin from part_prefix for comparison since captions might have it
-                part_prefix_for_match = part_prefix
-                if part_prefix.endswith('.bin'):
-                    part_prefix_for_match = part_prefix[:-4]  # Remove .bin
-                
-                part_prefix_normalized = part_prefix_for_match.lower().replace('_', '.').replace('-', '.')
-                
-                # Try to match captions to part files
-                for caption in captions:
-                    if caption in used_captions:
-                        continue
-                    
-                    # Remove .bin from caption for comparison
-                    caption_for_match = caption
-                    if caption.endswith('.bin'):
-                        caption_for_match = caption[:-4]  # Remove .bin
-                    
-                    caption_base = caption_for_match.lower().replace('_', '.').replace('-', '.')
-                    
-                    # Check various matching strategies
-                    # 1. Exact match (normalized)
-                    if part_prefix_normalized == caption_base:
-                        final_filename = caption  # Use caption as-is (it already has .bin)
-                        used_captions.add(caption)
-                        break
-                    
-                    # 2. Part prefix is contained in caption or vice versa
-                    if part_prefix_normalized in caption_base or caption_base in part_prefix_normalized:
-                        # Make sure it's a significant match (at least 10 characters)
-                        min_len = min(len(part_prefix_normalized), len(caption_base))
-                        if min_len >= 10:
-                            final_filename = caption  # Use caption as-is (it already has .bin)
-                            used_captions.add(caption)
-                            break
-                    
-                    # 3. Check if they share a significant common substring
-                    if len(part_prefix_normalized) >= 10 and len(caption_base) >= 10:
-                        # Check if first 10 chars match or last 10 chars match
-                        if (part_prefix_normalized[:10] in caption_base or 
-                            caption_base[:10] in part_prefix_normalized or
-                            part_prefix_normalized[-10:] in caption_base or
-                            caption_base[-10:] in part_prefix_normalized):
-                            final_filename = caption  # Use caption as-is (it already has .bin)
-                            used_captions.add(caption)
-                            break
-                
-                # If still no match, use the first unused caption (for cases where order matters)
-                if not final_filename and captions:
-                    for caption in captions:
-                        if caption not in used_captions:
-                            final_filename = caption
-                            used_captions.add(caption)
-                            break
-                
-                # Fallback to part_prefix with .bin extension
-                if not final_filename:
-                    if not part_prefix.endswith('.bin'):
-                        final_filename = part_prefix + '.bin'
-                    else:
-                        final_filename = part_prefix
-                
-                combined_file = os.path.join(root, final_filename)
-                
-                with open(combined_file, "wb") as combined:
-                    for part_file in part_files:
-                        part_file_path = os.path.join(root, part_file)
-                        with open(part_file_path, "rb") as pf:
-                            shutil.copyfileobj(pf, combined)
-                        os.remove(part_file_path)  # Optionally delete the part file
+    downloaded_names = []
+    seen_names = set()
+    for link in links_list:
+        caption = get_caption_from_link(link)
+        if not caption:
+            log_message(f"SKIPPED: Combine - Could not resolve caption from link: {link}")
+            continue
+        if not caption.endswith(".bin"):
+            caption = caption + ".bin"
+        if caption not in seen_names:
+            downloaded_names.append(caption)
+            seen_names.add(caption)
+
+    if not downloaded_names:
+        log_message("SKIPPED: Combine - No downloadable captions were resolved from the provided links")
+        return
+
+    file_names = [
+        name for name in os.listdir(directory)
+        if os.path.isfile(os.path.join(directory, name))
+    ]
+
+    for downloaded_name in downloaded_names:
+        # Combine only real split-part siblings like "name.bin.part00", "name.bin.part01", etc.
+        part_pattern = re.compile(rf"^{re.escape(downloaded_name)}\.part(\d+)$")
+        part_files = []
+        for file_name in file_names:
+            match = part_pattern.fullmatch(file_name)
+            if match:
+                part_files.append((int(match.group(1)), file_name))
+
+        # Leave standalone ".bin" files untouched.
+        if len(part_files) <= 1:
+            if len(part_files) == 1:
+                log_message(f"SKIPPED: {downloaded_name} - Only one split part found, leaving file as-is")
+            else:
+                log_message(f"SKIPPED: {downloaded_name} - No matching split parts found to combine")
+            continue
+
+        part_files.sort(key=lambda item: item[0])
+        combined_file = os.path.join(directory, downloaded_name)
+        log_message(f"Processing: {downloaded_name} - Combining {len(part_files)} part(s) into {combined_file}")
+
+        with open(combined_file, "wb") as combined:
+            for _part_number, part_file in part_files:
+                part_file_path = os.path.join(directory, part_file)
+                log_message(f"Processing: {downloaded_name} - Appending {part_file}")
+                with open(part_file_path, "rb") as pf:
+                    shutil.copyfileobj(pf, combined)
+                os.remove(part_file_path)
+                log_message(f"Completed: {downloaded_name} - Removed source part {part_file}")
+        log_message(f"Completed: {downloaded_name} - Combine finished")
 
 # Function to rename downloaded files using captions
 def rename_files_with_captions(directory, links_list):
@@ -617,12 +576,15 @@ def download():
     # Auto-detect: 1 link = Single, multiple links = Batch
     if len(links_list) == 1:
         # Single mode
+        log_message(f"Processing: Download - Single link mode selected for 1 link into {directory}")
         command_args.extend(["--dl", "--links", links_list[0]])
     else:
         # Batch mode - create temporary file with links
+        log_message(f"Processing: Download - Batch mode selected for {len(links_list)} links into {directory}")
         temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', prefix='tg_links_')
         temp_file.write('\n'.join(links_list))
         temp_file.close()
+        log_message(f"Processing: Download - Created temporary link list file {temp_file.name}")
         command_args.extend(["--dl", "--txt_file", temp_file.name])
 
     try:
@@ -633,15 +595,26 @@ def download():
     
     # Combine files after download if requested
     if combine and directory:
+        log_message("Processing: Download - Combine option enabled, checking for split files to restore")
         combine_files(directory, links_list)
     else:
+        if combine:
+            log_message("SKIPPED: Combine - Download directory is empty or unavailable")
+        else:
+            log_message("SKIPPED: Combine - Option disabled by user")
         # If not combining, rename files using captions
         if directory and links_list:
+            log_message("Processing: Download - Renaming downloaded files using captions because combine was not run")
             rename_files_with_captions(directory, links_list)
 
     if decrypt_after_download and directory:
         config_file_path = get_crypt_config_path()
+        log_message("Processing: Download - Decrypt option enabled, checking for .bin files to decrypt")
         decrypt_files_in_directory(directory, config_file_path)
+    elif decrypt_after_download:
+        log_message("SKIPPED: Decrypt - Download directory is empty or unavailable")
+    else:
+        log_message("SKIPPED: Decrypt - Option disabled by user")
     
     messagebox.showinfo("Info", "Download complete.")
 
@@ -689,10 +662,12 @@ def upload():
                 return
             for file_path in files:
                 if os.path.basename(file_path).lower().endswith(".bin"):
+                    log_message(f"SKIPPED: {os.path.basename(file_path)} - Encryption not needed because file already ends with .bin")
                     prepared_files.append(file_path)
                 else:
                     prepared_files.append(encrypt_file_for_upload(file_path, config_file_path))
         else:
+            log_message("SKIPPED: Encrypt - Option disabled by user")
             prepared_files = list(files)
     except Exception as exc:
         messagebox.showerror("Encryption Error", str(exc))
@@ -700,34 +675,50 @@ def upload():
 
     # Split files after encryption if needed
     files_to_upload = []
-    min_split_size = 2 * 1024 * 1024 * 1024  # 2GB in bytes
+    min_split_size = 2 * 1024 * 1024 * 1024  # Telegram per-file upload limit: 2GB
     original_sources_to_delete = set()
     generated_files_to_delete = set()
+    if delete_on_done:
+        log_message("Processing: Upload - Delete on Done is enabled, tracking source and generated files for cleanup")
+    else:
+        log_message("SKIPPED: Delete on Done - Option disabled by user")
     for original_file in files:
         if delete_on_done:
+            log_message(f"Processing: Upload - Marking original source for deletion after upload: {original_file}")
             original_sources_to_delete.add(original_file)
 
     for file_path in prepared_files:
         # Skip if already a part file
         if ".part" in os.path.basename(file_path):
+            log_message(f"SKIPPED: {os.path.basename(file_path)} - File is already a split part and will be uploaded as-is")
             files_to_upload.append(file_path)
         elif split_files:
-            # Check file size - only split if 2GB or larger
+            # Only split files that exceed Telegram's 2GB per-file upload limit.
             file_size = os.path.getsize(file_path)
-            if file_size >= min_split_size:
-                # Split the file
+            if file_size > min_split_size:
+                # Split only the oversized file and leave smaller files untouched.
                 part_files = split_file(file_path, split_size=1500 * 1024 * 1024)
                 files_to_upload.extend(part_files)
                 generated_files_to_delete.update(part_files)
                 generated_files_to_delete.add(file_path)
+                if delete_on_done:
+                    log_message(f"Processing: Upload - Marking generated split parts for deletion: {', '.join(part_files)}")
+                    log_message(f"Processing: Upload - Marking intermediate file for deletion after split upload: {file_path}")
             else:
-                # File is smaller than 2GB, upload as-is
+                # File is within the upload limit, so upload it as-is.
+                log_message(
+                    f"SKIPPED: {os.path.basename(file_path)} - Split not needed because file size "
+                    f"({file_size} bytes) is within the 2GB upload limit"
+                )
                 files_to_upload.append(file_path)
                 if delete_on_done and file_path not in original_sources_to_delete:
+                    log_message(f"Processing: Upload - Marking generated file for deletion after upload: {file_path}")
                     generated_files_to_delete.add(file_path)
         else:
+            log_message(f"SKIPPED: {os.path.basename(file_path)} - Split option disabled by user")
             files_to_upload.append(file_path)
             if delete_on_done and file_path not in original_sources_to_delete:
+                log_message(f"Processing: Upload - Marking generated file for deletion after upload: {file_path}")
                 generated_files_to_delete.add(file_path)
 
     # Upload all files (including split parts)
@@ -745,12 +736,19 @@ def upload():
             return
 
     if delete_on_done:
+        files_scheduled_for_cleanup = sorted(original_sources_to_delete | generated_files_to_delete)
+        if files_scheduled_for_cleanup:
+            log_message(f"Processing: Upload - Cleaning up {len(files_scheduled_for_cleanup)} file(s) because Delete on Done is enabled")
         for file_path in sorted(original_sources_to_delete | generated_files_to_delete):
             if os.path.exists(file_path):
                 try:
+                    log_message(f"Processing: Upload - Deleting file: {file_path}")
                     os.remove(file_path)
+                    log_message(f"Completed: Upload - Deleted file: {file_path}")
                 except OSError:
-                    pass
+                    log_message(f"SKIPPED: Delete on Done - Failed to delete file: {file_path}")
+            else:
+                log_message(f"SKIPPED: Delete on Done - File already missing, nothing to delete: {file_path}")
     messagebox.showinfo("Info", "Upload complete.")
 
 # Create the main window
@@ -800,7 +798,7 @@ scrollbar_tg_links = tk.Scrollbar(frame_download, orient=tk.VERTICAL, command=te
 scrollbar_tg_links.grid(row=2, column=3, sticky="ns", padx=(0, 5), pady=5)
 text_tg_links.config(yscrollcommand=scrollbar_tg_links.set)
 
-var_combine = tk.BooleanVar(value=False)
+var_combine = tk.BooleanVar(value=True)
 check_combine = tk.Checkbutton(frame_download, text="Combine", variable=var_combine)
 check_combine.grid(row=3, column=0, padx=5, pady=5)
 
@@ -863,8 +861,8 @@ var_delete_on_done = tk.BooleanVar(value=True)
 check_delete_on_done = tk.Checkbutton(frame_upload, text="Delete on Done", variable=var_delete_on_done)
 check_delete_on_done.grid(row=3, column=0, padx=5, pady=5)
 
-var_split = tk.BooleanVar(value=False)
-check_split = tk.Checkbutton(frame_upload, text="Split Files (1.5GB)", variable=var_split)
+var_split = tk.BooleanVar(value=True)
+check_split = tk.Checkbutton(frame_upload, text="Split Files", variable=var_split)
 check_split.grid(row=3, column=1, padx=5, pady=5)
 
 var_encrypt_upload = tk.BooleanVar(value=True)

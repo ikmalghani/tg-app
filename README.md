@@ -97,3 +97,41 @@ run.bat
 - "Custom Channel" is always available in the UI.
 - `Authorize`, `Upload`, and `Download` use the Python interpreter inside `tg-upload/venv` when it exists.
 - The app supports optional encrypt/decrypt using `crypt.conf` and `rclone`.
+
+## UI Options
+
+The upload and download sections include several checkboxes that are enabled by default because of the current file-handling logic.
+
+### Download options
+
+- `Combine`
+  Combines only files that belong to the same downloaded split set, such as `file.bin.part00`, `file.bin.part01`, and `file.bin.part02`.
+  It does not combine unrelated files in the folder.
+  It does not touch files that already end as plain `.bin`.
+  Leave this enabled for normal restores after downloading split uploads.
+  Turn it off if you want to keep the `.part00`, `.part01`, `.part02` files as separate pieces.
+
+- `Decrypt`
+  Decrypts downloaded `.bin` files after the download step finishes.
+  Leave this enabled if the uploaded files were encrypted with this app.
+  Turn it off if you want to keep the encrypted `.bin` files, or if the files were not encrypted in the first place.
+
+### Upload options
+
+- `Delete on Done`
+  Deletes the local source files after a successful upload.
+  If encryption or splitting creates temporary/generated files, those are also cleaned up based on the current workflow.
+  Leave this enabled if this app is part of a move/archive workflow.
+  Turn it off if you want to keep your local originals after upload.
+
+- `Split Files`
+  Only files larger than Telegram's 2GB per-file upload limit are split.
+  Files smaller than or equal to 2GB are uploaded as-is.
+  If you upload multiple files together, only the ones above 2GB are split; smaller files remain untouched.
+  Leave this enabled for normal uploads so oversized files are handled automatically.
+  Turn it off only if you do not want the app to prepare oversized files for Telegram.
+
+- `Encrypt`
+  Encrypts files before upload and produces `.bin` output for the upload step.
+  Leave this enabled if you want uploaded files stored in encrypted form.
+  Turn it off if you want Telegram to receive the original unencrypted files directly.

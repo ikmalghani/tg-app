@@ -22,4 +22,4 @@ crypt.conf
 **/.github/
 **/.vscode/
 **/venv/
-tg-upload/profile.session
+**/profile.session*
