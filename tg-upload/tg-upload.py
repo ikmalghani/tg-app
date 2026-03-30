@@ -281,12 +281,12 @@ def combine_file():
 def download_progress(current,total):
 	elapsed_time = time() - start_time
 	dl_speed = current / elapsed_time / 1024 / 1024
-	print(f"\rDL: [{filename}] - {filesize:.2f}MB | {current/total*100:.2f}% | {dl_speed:.2f}MB/s", end="")
+	print(f"\rDL: [{filename}] - {filesize:.2f}MB | {current/total*100:.2f}% | {dl_speed:.2f}MB/s", end="", flush=True)
 
 def upload_progress(current,total):
   elapsed_time = time() - start_time
   upload_speed = current / elapsed_time / 1024 / 1024
-  print(f"\rUP: [{filename}] - {current/total*100:.2f}% | {upload_speed:.2f}MB/s", end="")
+  print(f"\rUP: [{filename}] - {current/total*100:.2f}% | {upload_speed:.2f}MB/s", end="", flush=True)
 
 def get_chatid(raw_id):
   raw_id = raw_id.replace(" ", "")

@@ -1,10 +1,12 @@
 import importlib
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tkinter as tk
 from tkinter import filedialog
@@ -123,6 +125,91 @@ def log_message(message):
     print(message)
 
 def run_subprocess(command_args, working_directory=None):
+    process = subprocess.Popen(
+        command_args,
+        cwd=working_directory,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+    )
+
+    output_queue = queue.Queue()
+    collected_output = []
+
+    def enqueue_output():
+        buffer = bytearray()
+        try:
+            while True:
+                char = process.stdout.read(1)
+                if char == b"":
+                    break
+                if char in (b"\r", b"\n"):
+                    if buffer:
+                        output_queue.put((buffer.decode("utf-8", errors="replace"), char.decode("ascii", errors="ignore")))
+                        buffer.clear()
+                else:
+                    buffer.extend(char)
+            if buffer:
+                output_queue.put((buffer.decode("utf-8", errors="replace"), "\n"))
+        finally:
+            process.stdout.close()
+            output_queue.put(None)
+
+    reader_thread = threading.Thread(target=enqueue_output, daemon=True)
+    reader_thread.start()
+
+    root_widget = globals().get("root")
+    output_done = False
+    progress_prefixes = ("UP:", "DL:", "SPLIT:", "COMBINE:", "Calculating ")
+    progress_line_active = False
+    progress_line_length = 0
+    while not output_done or process.poll() is None:
+        try:
+            item = output_queue.get(timeout=0.1)
+            if item is None:
+                output_done = True
+            else:
+                line, separator = item
+                if line:
+                    collected_output.append(line)
+                    is_progress_update = separator == "\r" and line.startswith(progress_prefixes)
+                    if is_progress_update:
+                        padded_line = line.ljust(progress_line_length)
+                        sys.stdout.write(f"\r{padded_line}")
+                        sys.stdout.flush()
+                        progress_line_active = True
+                        progress_line_length = max(progress_line_length, len(line))
+                    else:
+                        if progress_line_active:
+                            sys.stdout.write("\n")
+                            sys.stdout.flush()
+                            progress_line_active = False
+                            progress_line_length = 0
+                        log_message(line)
+        except queue.Empty:
+            pass
+
+        if root_widget is not None and root_widget.winfo_exists():
+            try:
+                root_widget.update_idletasks()
+                root_widget.update()
+            except tk.TclError:
+                root_widget = None
+
+    if progress_line_active:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    returncode = process.wait()
+    stdout_text = "\n".join(collected_output)
+    return subprocess.CompletedProcess(
+        command_args,
+        returncode,
+        stdout=stdout_text,
+        stderr="",
+    )
+
+def run_subprocess_capture(command_args, working_directory=None):
     kwargs = {
         "cwd": working_directory,
         "capture_output": True,
@@ -131,6 +218,29 @@ def run_subprocess(command_args, working_directory=None):
     if platform.system() == "Windows":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     return subprocess.run(command_args, **kwargs)
+
+def run_subprocess_passthrough(command_args, working_directory=None):
+    kwargs = {
+        "cwd": working_directory,
+    }
+    process = subprocess.Popen(command_args, **kwargs)
+
+    root_widget = globals().get("root")
+    while process.poll() is None:
+        if root_widget is not None and root_widget.winfo_exists():
+            try:
+                root_widget.update_idletasks()
+                root_widget.update()
+            except tk.TclError:
+                root_widget = None
+        time.sleep(0.05)
+
+    return subprocess.CompletedProcess(
+        command_args,
+        process.returncode,
+        stdout="",
+        stderr="",
+    )
 
 def get_tg_upload_python():
     if platform.system() == "Windows":
@@ -142,15 +252,11 @@ def get_tg_upload_python():
     return sys.executable
 
 def run_tg_upload(arguments):
-    command_args = [get_tg_upload_python(), "tg-upload.py", *arguments]
+    command_args = [get_tg_upload_python(), "-u", "tg-upload.py", *arguments]
     log_message(f"Executing command: {' '.join(command_args)}")
     result = run_subprocess(command_args, working_directory=UPLOAD_DIR)
-    if result.stdout:
-        log_message(result.stdout.strip())
-    if result.stderr:
-        log_message(result.stderr.strip())
     if result.returncode != 0:
-        stderr = result.stderr.strip() if result.stderr else "tg-upload command failed."
+        stderr = result.stdout.strip() if result.stdout else "tg-upload command failed."
         raise RuntimeError(stderr)
     return result
 
@@ -206,6 +312,8 @@ def encrypt_decrypt(is_encrypt, file_or_folders, config_file_path):
                     "move",
                     normalized_path,
                     "crypt:.",
+                    "--progress",
+                    "--stats-one-line",
                 ]
             else:
                 remote_name = basename[:-4] if basename.lower().endswith(".bin") else basename
@@ -216,6 +324,8 @@ def encrypt_decrypt(is_encrypt, file_or_folders, config_file_path):
                     "move",
                     f"crypt:{remote_name}",
                     ".",
+                    "--progress",
+                    "--stats-one-line",
                 ]
         elif os.path.isdir(normalized_path):
             if is_encrypt:
@@ -228,6 +338,8 @@ def encrypt_decrypt(is_encrypt, file_or_folders, config_file_path):
                     "crypt:.",
                     "--transfers",
                     "1",
+                    "--progress",
+                    "--stats-one-line",
                 ]
             else:
                 command_args = [
@@ -239,16 +351,14 @@ def encrypt_decrypt(is_encrypt, file_or_folders, config_file_path):
                     normalized_path,
                     "--transfers",
                     "1",
+                    "--progress",
+                    "--stats-one-line",
                 ]
         else:
             raise FileNotFoundError(f"Invalid file or folder path: {file_or_folder}")
 
         log_message(f"Executing command: {' '.join(command_args)}")
-        result = run_subprocess(command_args, working_directory=file_directory)
-        if result.stdout:
-            log_message(result.stdout.strip())
-        if result.stderr:
-            log_message(result.stderr.strip())
+        result = run_subprocess_passthrough(command_args, working_directory=file_directory)
         if result.returncode != 0:
             action = "encrypt" if is_encrypt else "decrypt"
             raise RuntimeError(f"Failed to {action} {basename or normalized_path}")
@@ -548,208 +658,305 @@ def browse_download_directory():
     entry_download_dir.insert(0, download_directory)
 
 def download():
-    channel = var_channel.get()
-    if channel == "Custom Channel":
-        chat_id = entry_custom_chat_id.get()
-    else:
-        chat_id = CHANNEL_MAP.get(channel, "")
-
-    directory = entry_download_dir.get()
-    combine = var_combine.get()
-    decrypt_after_download = var_decrypt_download.get()
-
-    # Get links from text widget (one per line)
-    links_text = text_tg_links.get("1.0", tk.END).strip()
-    if not links_text:
-        messagebox.showerror("Error", "Please enter Telegram links in the text field.")
-        return
-
-    # Split by lines and filter out empty lines
-    links_list = [line.strip() for line in links_text.split('\n') if line.strip()]
-    
-    if not links_list:
-        messagebox.showerror("Error", "Please enter at least one Telegram link.")
-        return
-
-    command_args = ["--profile", "profile", "--chat_id", str(chat_id), "--dl_dir", directory]
-
-    # Auto-detect: 1 link = Single, multiple links = Batch
-    if len(links_list) == 1:
-        # Single mode
-        log_message(f"Processing: Download - Single link mode selected for 1 link into {directory}")
-        command_args.extend(["--dl", "--links", links_list[0]])
-    else:
-        # Batch mode - create temporary file with links
-        log_message(f"Processing: Download - Batch mode selected for {len(links_list)} links into {directory}")
-        temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', prefix='tg_links_')
-        temp_file.write('\n'.join(links_list))
-        temp_file.close()
-        log_message(f"Processing: Download - Created temporary link list file {temp_file.name}")
-        command_args.extend(["--dl", "--txt_file", temp_file.name])
-
+    set_download_button_busy(True)
     try:
-        run_tg_upload(command_args)
-    except Exception as exc:
-        show_copyable_error("Download Error", str(exc))
-        return
-    
-    # Combine files after download if requested
-    if combine and directory:
-        log_message("Processing: Download - Combine option enabled, checking for split files to restore")
-        combine_files(directory, links_list)
-    else:
-        if combine:
-            log_message("SKIPPED: Combine - Download directory is empty or unavailable")
+        channel = var_channel.get()
+        if channel == "Custom Channel":
+            chat_id = entry_custom_chat_id.get()
         else:
-            log_message("SKIPPED: Combine - Option disabled by user")
-        # If not combining, rename files using captions
-        if directory and links_list:
-            log_message("Processing: Download - Renaming downloaded files using captions because combine was not run")
-            rename_files_with_captions(directory, links_list)
+            chat_id = CHANNEL_MAP.get(channel, "")
 
-    if decrypt_after_download and directory:
-        config_file_path = get_crypt_config_path()
-        log_message("Processing: Download - Decrypt option enabled, checking for .bin files to decrypt")
-        decrypt_files_in_directory(directory, config_file_path)
-    elif decrypt_after_download:
-        log_message("SKIPPED: Decrypt - Download directory is empty or unavailable")
-    else:
-        log_message("SKIPPED: Decrypt - Option disabled by user")
-    
-    messagebox.showinfo("Info", "Download complete.")
+        directory = entry_download_dir.get()
+        combine = var_combine.get()
+        decrypt_after_download = var_decrypt_download.get()
+
+        # Get links from text widget (one per line)
+        links_text = text_tg_links.get("1.0", tk.END).strip()
+        if not links_text:
+            messagebox.showerror("Error", "Please enter Telegram links in the text field.")
+            return
+
+        # Split by lines and filter out empty lines
+        links_list = [line.strip() for line in links_text.split('\n') if line.strip()]
+        
+        if not links_list:
+            messagebox.showerror("Error", "Please enter at least one Telegram link.")
+            return
+
+        command_args = ["--profile", "profile", "--chat_id", str(chat_id), "--dl_dir", directory]
+
+        # Auto-detect: 1 link = Single, multiple links = Batch
+        if len(links_list) == 1:
+            # Single mode
+            log_message(f"Processing: Download - Single link mode selected for 1 link into {directory}")
+            command_args.extend(["--dl", "--links", links_list[0]])
+            temp_file = None
+        else:
+            # Batch mode - create temporary file with links
+            log_message(f"Processing: Download - Batch mode selected for {len(links_list)} links into {directory}")
+            temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', prefix='tg_links_')
+            temp_file.write('\n'.join(links_list))
+            temp_file.close()
+            log_message(f"Processing: Download - Created temporary link list file {temp_file.name}")
+            command_args.extend(["--dl", "--txt_file", temp_file.name])
+
+        try:
+            run_tg_upload(command_args)
+        except Exception as exc:
+            show_copyable_error("Download Error", str(exc))
+            return
+        finally:
+            if temp_file and os.path.exists(temp_file.name):
+                os.remove(temp_file.name)
+        
+        # Combine files after download if requested
+        if combine and directory:
+            log_message("Processing: Download - Combine option enabled, checking for split files to restore")
+            combine_files(directory, links_list)
+        else:
+            if combine:
+                log_message("SKIPPED: Combine - Download directory is empty or unavailable")
+            else:
+                log_message("SKIPPED: Combine - Option disabled by user")
+            # If not combining, rename files using captions
+            if directory and links_list:
+                log_message("Processing: Download - Renaming downloaded files using captions because combine was not run")
+                rename_files_with_captions(directory, links_list)
+
+        if decrypt_after_download and directory:
+            config_file_path = get_crypt_config_path()
+            log_message("Processing: Download - Decrypt option enabled, checking for .bin files to decrypt")
+            decrypt_files_in_directory(directory, config_file_path)
+        elif decrypt_after_download:
+            log_message("SKIPPED: Decrypt - Download directory is empty or unavailable")
+        else:
+            log_message("SKIPPED: Decrypt - Option disabled by user")
+        
+        messagebox.showinfo("Info", "Download complete.")
+    finally:
+        set_download_button_busy(False)
 
 def browse_upload_directory():
     upload_directory = filedialog.askdirectory()
     entry_upload_path.delete(0, tk.END)
     entry_upload_path.insert(0, upload_directory)
 
-def upload():
-    channel = var_channel_upload.get()
-    if channel == "Custom Channel":
-        chat_id = entry_custom_chat_id_upload.get()
-    else:
-        chat_id = CHANNEL_MAP.get(channel, "")
+def normalize_input_path(raw_path):
+    if not raw_path:
+        return ""
+    cleaned_path = raw_path.strip().strip('"').strip("'")
+    if not cleaned_path:
+        return ""
+    return os.path.abspath(os.path.normpath(cleaned_path))
 
-    source_type = var_source_type_upload.get()
-    delete_on_done = var_delete_on_done.get()
-    split_files = var_split.get()
-    encrypt_before_upload = var_encrypt_upload.get()
-    config_file_path = get_crypt_config_path()
+def iter_upload_source_files(source_type, selected_path):
+    selected_path = normalize_input_path(selected_path)
 
-    files = []
     if source_type == "File":
-        file_path = entry_upload_path.get()
-        if file_path and os.path.isfile(file_path):
-            files = [file_path]
-    else:
-        folder_path = entry_upload_path.get()
-        if folder_path:
-            files = [
-                os.path.join(folder_path, f)
-                for f in os.listdir(folder_path)
-                if os.path.isfile(os.path.join(folder_path, f))
-            ]
-
-    if not files:
-        messagebox.showerror("Error", "Please choose at least one valid file to upload.")
+        if selected_path and os.path.isfile(selected_path):
+            yield os.path.abspath(selected_path)
         return
 
-    prepared_files = []
-    try:
-        if encrypt_before_upload:
-            if not os.path.exists(config_file_path):
-                messagebox.showerror("Error", f"Config file not found: {config_file_path}")
-                return
-            for file_path in files:
-                if os.path.basename(file_path).lower().endswith(".bin"):
-                    log_message(f"SKIPPED: {os.path.basename(file_path)} - Encryption not needed because file already ends with .bin")
-                    prepared_files.append(file_path)
-                else:
-                    prepared_files.append(encrypt_file_for_upload(file_path, config_file_path))
-        else:
-            log_message("SKIPPED: Encrypt - Option disabled by user")
-            prepared_files = list(files)
-    except Exception as exc:
-        messagebox.showerror("Encryption Error", str(exc))
+    if not selected_path or not os.path.isdir(selected_path):
         return
 
-    # Split files after encryption if needed
-    files_to_upload = []
-    min_split_size = 2 * 1024 * 1024 * 1024  # Telegram per-file upload limit: 2GB
-    original_sources_to_delete = set()
-    generated_files_to_delete = set()
-    if delete_on_done:
-        log_message("Processing: Upload - Delete on Done is enabled, tracking source and generated files for cleanup")
-    else:
-        log_message("SKIPPED: Delete on Done - Option disabled by user")
-    for original_file in files:
-        if delete_on_done:
-            log_message(f"Processing: Upload - Marking original source for deletion after upload: {original_file}")
-            original_sources_to_delete.add(original_file)
-
-    for file_path in prepared_files:
-        # Skip if already a part file
-        if ".part" in os.path.basename(file_path):
-            log_message(f"SKIPPED: {os.path.basename(file_path)} - File is already a split part and will be uploaded as-is")
-            files_to_upload.append(file_path)
-        elif split_files:
-            # Only split files that exceed Telegram's 2GB per-file upload limit.
-            file_size = os.path.getsize(file_path)
-            if file_size > min_split_size:
-                # Split only the oversized file and leave smaller files untouched.
-                part_files = split_file(file_path, split_size=1500 * 1024 * 1024)
-                files_to_upload.extend(part_files)
-                generated_files_to_delete.update(part_files)
-                generated_files_to_delete.add(file_path)
-                if delete_on_done:
-                    log_message(f"Processing: Upload - Marking generated split parts for deletion: {', '.join(part_files)}")
-                    log_message(f"Processing: Upload - Marking intermediate file for deletion after split upload: {file_path}")
-            else:
-                # File is within the upload limit, so upload it as-is.
-                log_message(
-                    f"SKIPPED: {os.path.basename(file_path)} - Split not needed because file size "
-                    f"({file_size} bytes) is within the 2GB upload limit"
-                )
-                files_to_upload.append(file_path)
-                if delete_on_done and file_path not in original_sources_to_delete:
-                    log_message(f"Processing: Upload - Marking generated file for deletion after upload: {file_path}")
-                    generated_files_to_delete.add(file_path)
-        else:
-            log_message(f"SKIPPED: {os.path.basename(file_path)} - Split option disabled by user")
-            files_to_upload.append(file_path)
-            if delete_on_done and file_path not in original_sources_to_delete:
-                log_message(f"Processing: Upload - Marking generated file for deletion after upload: {file_path}")
-                generated_files_to_delete.add(file_path)
-
-    # Upload all files (including split parts)
-    for file_path in files_to_upload:
-        filename = os.path.basename(file_path)
+    pending_directories = [selected_path]
+    while pending_directories:
+        current_directory = pending_directories.pop()
         try:
-            run_tg_upload([
-                "--profile", "profile",
-                "--path", file_path,
-                "--chat_id", str(chat_id),
-                "--caption", filename,
-            ])
-        except Exception as exc:
-            show_copyable_error("Upload Error", str(exc))
+            with os.scandir(current_directory) as entries:
+                sorted_entries = sorted(entries, key=lambda entry: entry.name.lower())
+        except OSError as exc:
+            log_message(f"SKIPPED: Upload - Failed to scan folder: {current_directory} ({exc})")
+            continue
+
+        child_directories = []
+        for entry in sorted_entries:
+            try:
+                if entry.is_file(follow_symlinks=True):
+                    yield os.path.abspath(entry.path)
+                elif entry.is_dir(follow_symlinks=True):
+                    child_directories.append(entry.path)
+            except OSError as exc:
+                log_message(f"SKIPPED: Upload - Failed to inspect path: {entry.path} ({exc})")
+
+        for child_directory in reversed(child_directories):
+            pending_directories.append(child_directory)
+
+def delete_empty_directories(start_directory, root_directory):
+    current_directory = os.path.abspath(start_directory)
+    root_directory = os.path.abspath(root_directory)
+
+    while current_directory.startswith(root_directory):
+        if current_directory == root_directory:
+            break
+
+        if not os.path.isdir(current_directory):
+            break
+
+        try:
+            if os.listdir(current_directory):
+                break
+            log_message(f"Processing: Upload - Deleting empty folder: {current_directory}")
+            os.rmdir(current_directory)
+            log_message(f"Completed: Upload - Deleted empty folder: {current_directory}")
+        except OSError:
+            log_message(f"SKIPPED: Delete on Done - Failed to delete empty folder: {current_directory}")
+            break
+
+        parent_directory = os.path.dirname(current_directory)
+        if parent_directory == current_directory:
+            break
+        current_directory = parent_directory
+
+def set_upload_button_busy(is_busy):
+    if "button_upload" not in globals():
+        return
+    if is_busy:
+        button_upload.configure(state=tk.DISABLED, text="Uploading...")
+    else:
+        button_upload.configure(state=tk.NORMAL, text="Upload")
+    if "root" in globals() and root.winfo_exists():
+        root.update_idletasks()
+
+def set_download_button_busy(is_busy):
+    if "button_download" not in globals():
+        return
+    if is_busy:
+        button_download.configure(state=tk.DISABLED, text="Downloading...")
+    else:
+        button_download.configure(state=tk.NORMAL, text="Download")
+    if "root" in globals() and root.winfo_exists():
+        root.update_idletasks()
+
+def upload():
+    set_upload_button_busy(True)
+    try:
+        channel = var_channel_upload.get()
+        if channel == "Custom Channel":
+            chat_id = entry_custom_chat_id_upload.get()
+        else:
+            chat_id = CHANNEL_MAP.get(channel, "")
+
+        source_type = var_source_type_upload.get()
+        delete_on_done = var_delete_on_done.get()
+        split_files = var_split.get()
+        encrypt_before_upload = var_encrypt_upload.get()
+        config_file_path = get_crypt_config_path()
+        selected_path = normalize_input_path(entry_upload_path.get())
+
+        if not selected_path:
+            messagebox.showerror("Error", "Please choose a valid upload path.")
             return
 
-    if delete_on_done:
-        files_scheduled_for_cleanup = sorted(original_sources_to_delete | generated_files_to_delete)
-        if files_scheduled_for_cleanup:
-            log_message(f"Processing: Upload - Cleaning up {len(files_scheduled_for_cleanup)} file(s) because Delete on Done is enabled")
-        for file_path in sorted(original_sources_to_delete | generated_files_to_delete):
-            if os.path.exists(file_path):
-                try:
-                    log_message(f"Processing: Upload - Deleting file: {file_path}")
-                    os.remove(file_path)
-                    log_message(f"Completed: Upload - Deleted file: {file_path}")
-                except OSError:
-                    log_message(f"SKIPPED: Delete on Done - Failed to delete file: {file_path}")
+        if source_type == "Folder":
+            log_message(f"Processing: Upload - Walking folder root: {selected_path}")
+            if not os.path.isdir(selected_path):
+                messagebox.showerror("Error", f"Folder does not exist or is not accessible: {selected_path}")
+                return
+        elif not os.path.isfile(selected_path):
+            messagebox.showerror("Error", f"File does not exist or is not accessible: {selected_path}")
+            return
+
+        if encrypt_before_upload and not os.path.exists(config_file_path):
+            messagebox.showerror("Error", f"Config file not found: {config_file_path}")
+            return
+
+        min_split_size = 2 * 1024 * 1024 * 1024  # Telegram per-file upload limit: 2GB
+        if delete_on_done:
+            log_message("Processing: Upload - Delete on Done is enabled, each source file will be removed after its upload finishes")
+        else:
+            log_message("SKIPPED: Delete on Done - Option disabled by user")
+
+        found_any_file = False
+        for original_file in iter_upload_source_files(source_type, selected_path):
+            found_any_file = True
+            current_file = original_file
+            files_to_upload = []
+            files_to_delete = set()
+
+            if delete_on_done:
+                files_to_delete.add(original_file)
+                log_message(f"Processing: Upload - Marking original source for deletion after upload: {original_file}")
+
+            try:
+                if encrypt_before_upload:
+                    if os.path.basename(current_file).lower().endswith(".bin"):
+                        log_message(f"SKIPPED: {os.path.basename(current_file)} - Encryption not needed because file already ends with .bin")
+                    else:
+                        current_file = encrypt_file_for_upload(current_file, config_file_path)
+                        if delete_on_done:
+                            files_to_delete.add(current_file)
+                else:
+                    log_message(f"SKIPPED: {os.path.basename(current_file)} - Encrypt option disabled by user")
+            except Exception as exc:
+                messagebox.showerror("Encryption Error", str(exc))
+                return
+
+            if ".part" in os.path.basename(current_file):
+                log_message(f"SKIPPED: {os.path.basename(current_file)} - File is already a split part and will be uploaded as-is")
+                files_to_upload.append(current_file)
+                if delete_on_done:
+                    files_to_delete.add(current_file)
+            elif split_files:
+                file_size = os.path.getsize(current_file)
+                if file_size > min_split_size:
+                    part_files = split_file(current_file, split_size=1500 * 1024 * 1024)
+                    files_to_upload.extend(part_files)
+                    if delete_on_done:
+                        files_to_delete.update(part_files)
+                        files_to_delete.add(current_file)
+                        log_message(f"Processing: Upload - Marking generated split parts for deletion: {', '.join(part_files)}")
+                        log_message(f"Processing: Upload - Marking intermediate file for deletion after split upload: {current_file}")
+                else:
+                    log_message(
+                        f"SKIPPED: {os.path.basename(current_file)} - Split not needed because file size "
+                        f"({file_size} bytes) is within the 2GB upload limit"
+                    )
+                    files_to_upload.append(current_file)
+                    if delete_on_done:
+                        files_to_delete.add(current_file)
             else:
-                log_message(f"SKIPPED: Delete on Done - File already missing, nothing to delete: {file_path}")
-    messagebox.showinfo("Info", "Upload complete.")
+                log_message(f"SKIPPED: {os.path.basename(current_file)} - Split option disabled by user")
+                files_to_upload.append(current_file)
+                if delete_on_done:
+                    files_to_delete.add(current_file)
+
+            for file_path in files_to_upload:
+                filename = os.path.basename(file_path)
+                log_message(f"Processing: Upload - Uploading file now: {filename}")
+                try:
+                    run_tg_upload([
+                        "--profile", "profile",
+                        "--path", file_path,
+                        "--chat_id", str(chat_id),
+                        "--caption", filename,
+                    ])
+                except Exception as exc:
+                    show_copyable_error("Upload Error", str(exc))
+                    return
+
+            if delete_on_done:
+                for file_path in sorted(files_to_delete):
+                    if os.path.exists(file_path):
+                        try:
+                            log_message(f"Processing: Upload - Deleting file: {file_path}")
+                            os.remove(file_path)
+                            log_message(f"Completed: Upload - Deleted file: {file_path}")
+                        except OSError:
+                            log_message(f"SKIPPED: Delete on Done - Failed to delete file: {file_path}")
+                    else:
+                        log_message(f"SKIPPED: Delete on Done - File already missing, nothing to delete: {file_path}")
+
+                if source_type == "Folder":
+                    delete_empty_directories(os.path.dirname(original_file), selected_path)
+
+        if not found_any_file:
+            messagebox.showerror("Error", f"No files were found under: {selected_path}")
+            return
+        messagebox.showinfo("Info", "Upload complete.")
+    finally:
+        set_upload_button_busy(False)
 
 # Create the main window
 root = tk.Tk()
