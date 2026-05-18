@@ -125,9 +125,9 @@ The upload and download sections include several checkboxes that are enabled by 
   Turn it off if you want to keep your local originals after upload.
 
 - `Split Files`
-  Only files larger than Telegram's 2GB per-file upload limit are split.
-  Files smaller than or equal to 2GB are uploaded as-is.
-  If you upload multiple files together, only the ones above 2GB are split; smaller files remain untouched.
+  Only files larger than 1.9GB are split.
+  Files smaller than or equal to 1.9GB are uploaded as-is.
+  If you upload multiple files together, only the ones above 1.9GB are split; smaller files remain untouched.
   Leave this enabled for normal uploads so oversized files are handled automatically.
   Turn it off only if you do not want the app to prepare oversized files for Telegram.
 

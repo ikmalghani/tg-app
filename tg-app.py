@@ -862,13 +862,15 @@ def upload():
             messagebox.showerror("Error", f"Config file not found: {config_file_path}")
             return
 
-        min_split_size = 2 * 1024 * 1024 * 1024  # Telegram per-file upload limit: 2GB
+        min_split_size = int(1.9 * 1024 * 1024 * 1024)  # Split before Telegram's 2GB upload limit
         if delete_on_done:
             log_message("Processing: Upload - Delete on Done is enabled, each source file will be removed after its upload finishes")
         else:
             log_message("SKIPPED: Delete on Done - Option disabled by user")
 
         found_any_file = False
+        pending_delete_files = set()
+        pending_empty_dir_roots = []
         for original_file in iter_upload_source_files(source_type, selected_path):
             found_any_file = True
             current_file = original_file
@@ -911,7 +913,7 @@ def upload():
                 else:
                     log_message(
                         f"SKIPPED: {os.path.basename(current_file)} - Split not needed because file size "
-                        f"({file_size} bytes) is within the 2GB upload limit"
+                        f"({file_size} bytes) is within the 1.9GB split threshold"
                     )
                     files_to_upload.append(current_file)
                     if delete_on_done:
@@ -937,23 +939,31 @@ def upload():
                     return
 
             if delete_on_done:
-                for file_path in sorted(files_to_delete):
-                    if os.path.exists(file_path):
-                        try:
-                            log_message(f"Processing: Upload - Deleting file: {file_path}")
-                            os.remove(file_path)
-                            log_message(f"Completed: Upload - Deleted file: {file_path}")
-                        except OSError:
-                            log_message(f"SKIPPED: Delete on Done - Failed to delete file: {file_path}")
-                    else:
-                        log_message(f"SKIPPED: Delete on Done - File already missing, nothing to delete: {file_path}")
-
+                pending_delete_files.update(files_to_delete)
                 if source_type == "Folder":
-                    delete_empty_directories(os.path.dirname(original_file), selected_path)
+                    pending_empty_dir_roots.append(os.path.dirname(original_file))
 
         if not found_any_file:
             messagebox.showerror("Error", f"No files were found under: {selected_path}")
             return
+
+        if delete_on_done:
+            log_message("Completed: Upload - All Telegram uploads succeeded, Delete on Done will now remove staged files")
+            for file_path in sorted(pending_delete_files):
+                if os.path.exists(file_path):
+                    try:
+                        log_message(f"Processing: Upload - Deleting file: {file_path}")
+                        os.remove(file_path)
+                        log_message(f"Completed: Upload - Deleted file: {file_path}")
+                    except OSError:
+                        log_message(f"SKIPPED: Delete on Done - Failed to delete file: {file_path}")
+                else:
+                    log_message(f"SKIPPED: Delete on Done - File already missing, nothing to delete: {file_path}")
+
+            if source_type == "Folder":
+                for directory in pending_empty_dir_roots:
+                    delete_empty_directories(directory, selected_path)
+
         messagebox.showinfo("Info", "Upload complete.")
     finally:
         set_upload_button_busy(False)
