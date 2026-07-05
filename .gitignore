@@ -22,4 +22,5 @@ crypt.conf
 **/.github/
 **/.vscode/
 **/venv/
+**/tgappenv/
 **/profile.session*

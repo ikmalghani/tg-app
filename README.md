@@ -36,7 +36,7 @@ tg-app/
    |_ caption.json
    |_ profile.session (appears after you click Authorize successfully)
    |_ proxy-sample.json
-   |_ venv/
+   |_ tgappenv/ (Windows virtual environment)
 ```
 
 ## Setup
@@ -45,21 +45,98 @@ tg-app/
 2. Fill in `API_ID`, `API_HASH`, and `BOT_TOKEN`.
 3. Configure your channels in `.env`.
 4. Copy `crypt.conf.example` to `crypt.conf` and update it for your rclone crypt remote if you want encrypt/decrypt support.
-5. Create the backend virtual environment and install dependencies:
+5. Set up Python with pyenv and install backend dependencies.
+
+### Ubuntu / Debian
+
+Install pyenv:
+
+```bash
+curl -fsSL https://pyenv.run | bash
+```
+
+Add these lines to `~/.bashrc`, then reload your shell:
+
+```bash
+# Pyenv setup
+export PYENV_ROOT="$HOME/.pyenv"
+export PATH="$PYENV_ROOT/bin:$PATH"
+
+eval "$(pyenv init --path)"
+eval "$(pyenv init -)"
+eval "$(pyenv virtualenv-init -)"
+```
+
+```bash
+source ~/.bashrc
+```
+
+Install libraries required to build Python:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  make build-essential libssl-dev zlib1g-dev \
+  libbz2-dev libreadline-dev libsqlite3-dev \
+  wget curl llvm libncursesw5-dev xz-utils \
+  tk-dev libxml2-dev libxmlsec1-dev libffi-dev \
+  liblzma-dev
+```
+
+Install Python 3.12 and create the virtual environment:
+
+```bash
+pyenv install 3.12.13
+pyenv virtualenv 3.12.13 tgappenv
+pyenv activate tgappenv
+```
+
+Install tg-upload requirements:
 
 ```bash
 cd /path/to/tg-app/tg-upload
-python3 -m venv venv
-source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-On Windows:
+### Windows
 
-```bat
+Install [pyenv-win](https://github.com/pyenv-win/pyenv-win) in PowerShell:
+
+```powershell
+Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/pyenv-win/pyenv-win/master/pyenv-win/install-pyenv-win.ps1" -OutFile "$env:TEMP\install-pyenv-win.ps1"; & "$env:TEMP\install-pyenv-win.ps1"
+```
+
+Add these to your user environment variables (System Properties → Environment Variables, or your PowerShell profile), then open a new terminal:
+
+```powershell
+$env:PYENV = "$env:USERPROFILE\.pyenv\pyenv-win\"
+$env:PYENV_ROOT = "$env:USERPROFILE\.pyenv\pyenv-win\"
+$env:PYENV_HOME = "$env:USERPROFILE\.pyenv\pyenv-win\"
+$env:Path = "$env:PYENV_ROOT\bin;$env:PYENV_ROOT\shims;$env:Path"
+```
+
+Install build tools required to compile Python on Windows:
+
+- Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **Desktop development with C++** workload.
+
+Install Python 3.12 and create the virtual environment:
+
+```powershell
+pyenv install 3.12.13
+pyenv global 3.12.13
+```
+
+`pyenv-virtualenv` is not available on Windows, so create a named venv with the pyenv-managed Python instead:
+
+```powershell
 cd C:\Users\username\path\to\tg-app\tg-upload
-python -m venv venv
-call venv\Scripts\activate.bat
+python -m venv tgappenv
+.\tgappenv\Scripts\Activate.ps1
+```
+
+Install tg-upload requirements:
+
+```powershell
 pip install -r requirements.txt
 ```
 
@@ -75,19 +152,19 @@ CHANNELID2 = "-1000000000001"
 
 ## Run
 
-Start the app with the provided launcher so the backend virtual environment is activated first.
+The launchers resolve their own directory, so they work on any machine regardless of username or install path.
 
 Linux/macOS:
 
 ```bash
-cd /home/malnitro5/Documents/Tools/tg-app
+cd /path/to/tg-app
 ./run.sh
 ```
 
 Windows:
 
-```bat
-cd /d C:\Users\malnitro5\Documents\Tools\tg-app
+```powershell
+cd C:\Users\username\path\to\tg-app
 run.bat
 ```
 
@@ -95,7 +172,7 @@ run.bat
 
 - The app reads `.env` on startup.
 - "Custom Channel" is always available in the UI.
-- `Authorize`, `Upload`, and `Download` use the Python interpreter inside `tg-upload/venv` when it exists.
+- `Authorize`, `Upload`, and `Download` use the active Python environment (`tgappenv`).
 - The app supports optional encrypt/decrypt using `crypt.conf` and `rclone`.
 
 ## UI Options
