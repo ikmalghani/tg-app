@@ -39,6 +39,13 @@ API_ID = os.getenv("API_ID", "").strip()
 API_HASH = os.getenv("API_HASH", "").strip()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
+def get_browse_start_path(env_key):
+    """Return configured browse start path if it exists, otherwise the app directory."""
+    configured = os.getenv(env_key, "").strip().strip('"').strip("'")
+    if configured and os.path.isdir(configured):
+        return os.path.abspath(os.path.normpath(configured))
+    return BASE_DIR
+
 def _load_channels_from_env():
     """
     Supported .env formats:
@@ -640,22 +647,25 @@ def authorize():
 # Removed browse_txt_file function - using text field instead
 
 def browse_upload():
+    initial_dir = get_browse_start_path("BROWSE_UPLOAD_PATH")
     source_type = var_source_type_upload.get()
     if source_type == "File":
-        file_path = filedialog.askopenfilename()
+        file_path = filedialog.askopenfilename(initialdir=initial_dir)
         if file_path:
             entry_upload_path.delete(0, tk.END)
             entry_upload_path.insert(0, file_path)
     else:
-        folder_path = filedialog.askdirectory()
+        folder_path = filedialog.askdirectory(initialdir=initial_dir)
         if folder_path:
             entry_upload_path.delete(0, tk.END)
             entry_upload_path.insert(0, folder_path)
 
 def browse_download_directory():
-    download_directory = filedialog.askdirectory()
-    entry_download_dir.delete(0, tk.END)
-    entry_download_dir.insert(0, download_directory)
+    initial_dir = get_browse_start_path("BROWSE_DOWNLOAD_PATH")
+    download_directory = filedialog.askdirectory(initialdir=initial_dir)
+    if download_directory:
+        entry_download_dir.delete(0, tk.END)
+        entry_download_dir.insert(0, download_directory)
 
 def download():
     set_download_button_busy(True)
@@ -737,9 +747,11 @@ def download():
         set_download_button_busy(False)
 
 def browse_upload_directory():
-    upload_directory = filedialog.askdirectory()
-    entry_upload_path.delete(0, tk.END)
-    entry_upload_path.insert(0, upload_directory)
+    initial_dir = get_browse_start_path("BROWSE_UPLOAD_PATH")
+    upload_directory = filedialog.askdirectory(initialdir=initial_dir)
+    if upload_directory:
+        entry_upload_path.delete(0, tk.END)
+        entry_upload_path.insert(0, upload_directory)
 
 def normalize_input_path(raw_path):
     if not raw_path:
