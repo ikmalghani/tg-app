@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Telegram Upload/Download</title>
+  <style>
+    :root {
+      --bg: #ece9e0;
+      --panel: #f7f5ef;
+      --ink: #1c1a16;
+      --muted: #5c574e;
+      --line: #c9c3b4;
+      --accent: #6ba3c7;
+      --accent-ink: #123247;
+      --ok: #2f6b45;
+      --warn: #8a5a12;
+      --err: #8b2e2e;
+      --track: #ddd7c9;
+      --fill: #3d7ea6;
+      --font: "Segoe UI", "Helvetica Neue", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--font);
+      color: var(--ink);
+      background:
+        radial-gradient(ellipse 80% 50% at 10% -10%, #dfe9f0 0%, transparent 55%),
+        radial-gradient(ellipse 60% 40% at 100% 0%, #e8dfcf 0%, transparent 50%),
+        var(--bg);
+    }
+    .app { max-width: 720px; margin: 0 auto; padding: 24px 16px 48px; }
+    .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    h1 { margin: 0 0 4px; font-size: 1.35rem; font-weight: 650; letter-spacing: -0.02em; }
+    .subtitle { margin: 0; color: var(--muted); font-size: 0.9rem; }
+    .disk {
+      font-size: 0.78rem;
+      color: var(--muted);
+      text-align: right;
+      line-height: 1.35;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 14px 16px 16px;
+      margin-bottom: 14px;
+    }
+    .panel-title {
+      margin: 0 0 12px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 130px 1fr;
+      gap: 8px 12px;
+      align-items: start;
+      margin-bottom: 10px;
+    }
+    .row > label.field-label, .row > span.field-label { padding-top: 7px; font-size: 0.9rem; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+    .radio, .check {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 0.9rem; cursor: pointer; user-select: none;
+    }
+    input[type="text"], textarea {
+      width: 100%; font: inherit; color: var(--ink); background: #fff;
+      border: 1px solid var(--line); border-radius: 3px; padding: 7px 9px;
+    }
+    textarea { min-height: 140px; resize: vertical; line-height: 1.4; }
+    button {
+      font: inherit; cursor: pointer; border: 1px solid var(--line);
+      border-radius: 3px; background: #fff; color: var(--ink); padding: 7px 14px;
+    }
+    button:hover:not(:disabled) { background: #f0ede5; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    button.primary {
+      background: var(--accent); border-color: #5a91b3; color: var(--accent-ink); font-weight: 600;
+    }
+    button.primary:hover:not(:disabled) { background: #7db0d0; }
+    button.linkish { border: none; background: transparent; color: var(--accent-ink); text-decoration: underline; padding: 0; }
+    .actions { display: flex; justify-content: center; gap: 10px; margin-top: 6px; }
+    .dropzone {
+      border: 1.5px dashed var(--line); border-radius: 4px; background: #fff;
+      padding: 22px 16px; text-align: center; color: var(--muted); cursor: pointer;
+    }
+    .dropzone:hover, .dropzone.dragover { border-color: var(--fill); background: #f3f8fb; color: var(--ink); }
+    .dropzone strong { color: var(--ink); }
+    .file-list { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .file-item { background: #fff; border: 1px solid var(--line); border-radius: 3px; padding: 10px 12px; }
+    .file-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; margin-bottom: 6px; }
+    .file-name { font-size: 0.9rem; font-weight: 600; word-break: break-all; }
+    .file-meta { flex-shrink: 0; font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
+    .progress { height: 8px; background: var(--track); border-radius: 999px; overflow: hidden; }
+    .progress > span { display: block; height: 100%; width: 0%; background: var(--fill); border-radius: inherit; transition: width 0.2s ease; }
+    .file-status { margin-top: 5px; font-size: 0.78rem; color: var(--muted); }
+    .file-status.ok { color: var(--ok); }
+    .file-status.warn { color: var(--warn); }
+    .file-status.err { color: var(--err); }
+    .queue-banner {
+      display: flex; justify-content: space-between; align-items: center; gap: 10px;
+      margin-bottom: 10px; padding: 8px 10px; background: #e8eef3;
+      border: 1px solid #c5d5e2; border-radius: 3px; font-size: 0.82rem; color: var(--accent-ink);
+    }
+    .queue-banner[hidden] { display: none; }
+    .status-bar { margin-top: 8px; min-height: 1.2em; font-size: 0.82rem; color: var(--muted); text-align: center; }
+    .hint { margin: 4px 0 0; font-size: 0.78rem; color: var(--muted); }
+    a.dl { color: var(--ok); font-weight: 600; }
+    @media (max-width: 560px) {
+      .row { grid-template-columns: 1fr; }
+      .top { flex-direction: column; }
+      .disk { text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="top">
+      <div>
+        <h1>Telegram Upload/Download</h1>
+        <p class="subtitle">Cloud · one task at a time · protected by Cloudflare Access</p>
+      </div>
+      <div class="disk" id="disk-info">Disk: …</div>
+    </div>
+
+    <section class="panel">
+      <h2 class="panel-title">Authorize</h2>
+      <div class="actions">
+        <button type="button" class="primary" id="btn-authorize">Authorize</button>
+      </div>
+      <p class="status-bar" id="auth-status"></p>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Download</h2>
+      <div class="row">
+        <label class="field-label">Channel:</label>
+        <div class="controls" id="dl-channels" role="radiogroup"></div>
+      </div>
+      <div class="row">
+        <label class="field-label" for="dl-custom-id">Custom Chat ID:</label>
+        <input type="text" id="dl-custom-id" placeholder="-100…" autocomplete="off" />
+      </div>
+      <div class="row">
+        <label class="field-label" for="dl-links">TG Links:</label>
+        <div>
+          <textarea id="dl-links" placeholder="One Telegram message link per line"></textarea>
+          <p class="hint">Server downloads first, then you get the finished file(s).</p>
+        </div>
+      </div>
+      <div class="row">
+        <span class="field-label">Options:</span>
+        <div class="controls">
+          <label class="check"><input type="checkbox" id="dl-combine" checked /> Combine</label>
+          <label class="check"><input type="checkbox" id="dl-decrypt" checked /> Decrypt</label>
+        </div>
+      </div>
+      <div class="queue-banner" id="dl-queue-banner" hidden>
+        <span id="dl-queue-text">Queue idle</span>
+      </div>
+      <div class="file-list" id="dl-file-list"></div>
+      <div class="actions"><button type="button" id="btn-download">Download</button></div>
+      <p class="status-bar" id="dl-status"></p>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Upload</h2>
+      <div class="row">
+        <label class="field-label">Channel:</label>
+        <div class="controls" id="up-channels" role="radiogroup"></div>
+      </div>
+      <div class="row">
+        <label class="field-label" for="up-custom-id">Custom Chat ID:</label>
+        <input type="text" id="up-custom-id" placeholder="-100…" autocomplete="off" />
+      </div>
+      <div class="row">
+        <span class="field-label">Options:</span>
+        <div class="controls">
+          <label class="check"><input type="checkbox" id="up-delete" checked /> Delete on Done</label>
+          <label class="check"><input type="checkbox" id="up-split" checked /> Split Files</label>
+          <label class="check"><input type="checkbox" id="up-encrypt" checked /> Encrypt</label>
+        </div>
+      </div>
+      <div class="row">
+        <span class="field-label">Source:</span>
+        <div>
+          <div class="dropzone" id="dropzone" tabindex="0" role="button">
+            <strong>Drop files here</strong> or click to browse<br />
+            <span style="font-size:0.82rem">Multiple files · queued one at a time · disk-checked before accept</span>
+          </div>
+          <input type="file" id="file-input" multiple hidden />
+        </div>
+      </div>
+      <div class="queue-banner" id="up-queue-banner" hidden>
+        <span id="up-queue-text">Queue idle</span>
+        <button type="button" id="btn-up-clear">Clear list</button>
+      </div>
+      <div class="file-list" id="up-file-list"></div>
+      <div class="actions"><button type="button" id="btn-upload">Upload</button></div>
+      <p class="status-bar" id="up-status"></p>
+    </section>
+  </div>
+
+  <script>
+    let CHANNELS = [];
+    /** @type {{ localId: string, file: File, jobId?: string, status: string, progress: number, message: string }[]} */
+    let uploadItems = [];
+    /** @type {Record<string, {id:string,status:string,progress:number,message:string,result?:any,file_name?:string}>} */
+    let trackedJobs = {};
+    let pollTimer = null;
+
+    function escapeHtml(s) {
+      return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
+    }
+    function formatBytes(n) {
+      if (n < 1024) return n + " B";
+      if (n < 1024 ** 2) return (n / 1024).toFixed(1) + " KB";
+      if (n < 1024 ** 3) return (n / 1024 ** 2).toFixed(1) + " MB";
+      return (n / 1024 ** 3).toFixed(2) + " GB";
+    }
+    function uid() { return Math.random().toString(36).slice(2, 10); }
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, { credentials: "same-origin", ...options });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = data.detail || data.message || res.statusText;
+        throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      }
+      return data;
+    }
+
+    function renderChannels(containerId, groupName, selected) {
+      const el = document.getElementById(containerId);
+      el.innerHTML = "";
+      const names = [...CHANNELS.map((c) => c.name), "Custom Channel"];
+      names.forEach((name, i) => {
+        const label = document.createElement("label");
+        label.className = "radio";
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = groupName;
+        input.value = name;
+        input.checked = name === selected || (i === 0 && !selected);
+        label.append(input, document.createTextNode(name));
+        el.appendChild(label);
+      });
+    }
+
+    function selectedChannel(groupName) {
+      const checked = document.querySelector(`input[name="${groupName}"]:checked`);
+      return checked ? checked.value : "Custom Channel";
+    }
+
+    function renderUploadList() {
+      const list = document.getElementById("up-file-list");
+      const banner = document.getElementById("up-queue-banner");
+      list.innerHTML = "";
+      if (!uploadItems.length) { banner.hidden = true; return; }
+      banner.hidden = false;
+      const active = uploadItems.filter((f) => ["queued","running"].includes(f.status)).length;
+      document.getElementById("up-queue-text").textContent =
+        `${uploadItems.length} file(s) · ${active} active/queued · concurrency 1`;
+
+      uploadItems.forEach((item) => {
+        const cls = item.status === "done" ? "ok" : item.status === "error" ? "err" : item.status === "running" ? "warn" : "";
+        const row = document.createElement("div");
+        row.className = "file-item";
+        row.innerHTML = `
+          <div class="file-head">
+            <div class="file-name">${escapeHtml(item.file.name)}</div>
+            <div class="file-meta">${formatBytes(item.file.size)}</div>
+          </div>
+          <div class="progress"><span style="width:${item.progress}%"></span></div>
+          <div class="file-status ${cls}">${escapeHtml(item.message)}</div>`;
+        list.appendChild(row);
+      });
+    }
+
+    function renderDownloadJob(job) {
+      const list = document.getElementById("dl-file-list");
+      const banner = document.getElementById("dl-queue-banner");
+      banner.hidden = false;
+      document.getElementById("dl-queue-text").textContent = `Job ${job.id} · ${job.status}`;
+      const cls = job.status === "done" ? "ok" : job.status === "error" ? "err" : "warn";
+      let linksHtml = "";
+      if (job.status === "done" && job.result && job.result.files) {
+        linksHtml = job.result.files.map((rel) => {
+          const name = rel.split("/").pop();
+          return `<div><a class="dl" href="/api/files/${job.id}/${encodeURIComponent(name)}">${escapeHtml(name)}</a></div>`;
+        }).join("");
+      }
+      list.innerHTML = `
+        <div class="file-item">
+          <div class="file-head">
+            <div class="file-name">${escapeHtml(job.file_name || "Download")}</div>
+            <div class="file-meta">${escapeHtml(job.id)}</div>
+          </div>
+          <div class="progress"><span style="width:${job.progress || 0}%"></span></div>
+          <div class="file-status ${cls}">${escapeHtml(job.message || "")}</div>
+          ${linksHtml}
+        </div>`;
+    }
+
+    function ensurePolling() {
+      if (pollTimer) return;
+      pollTimer = setInterval(async () => {
+        const ids = Object.keys(trackedJobs);
+        if (!ids.length) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+          return;
+        }
+        let anyActive = false;
+        for (const id of ids) {
+          const prev = trackedJobs[id];
+          if (prev.status === "done" || prev.status === "error") continue;
+          anyActive = true;
+          try {
+            const job = await api(`/api/jobs/${id}`);
+            trackedJobs[id] = job;
+            syncJobToUi(job);
+          } catch (_) { /* ignore transient */ }
+        }
+        if (!anyActive) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+          refreshConfig();
+        }
+      }, 1000);
+    }
+
+    function trackJob(job) {
+      trackedJobs[job.id] = job;
+      syncJobToUi(job);
+      ensurePolling();
+    }
+
+    function syncJobToUi(job) {
+      if (job.kind === "upload") {
+        const item = uploadItems.find((u) => u.jobId === job.id);
+        if (item) {
+          item.status = job.status;
+          item.progress = job.progress || 0;
+          item.message = job.message || job.status;
+          renderUploadList();
+        }
+      } else if (job.kind === "download") {
+        renderDownloadJob(job);
+        document.getElementById("dl-status").textContent =
+          job.status === "done" ? "Download complete." :
+          job.status === "error" ? job.message : "Downloading…";
+      } else if (job.kind === "authorize") {
+        document.getElementById("auth-status").textContent = job.message || job.status;
+      }
+    }
+
+    function addFiles(fileList) {
+      Array.from(fileList || []).forEach((file) => {
+        uploadItems.push({
+          localId: uid(),
+          file,
+          status: "queued",
+          progress: 0,
+          message: "Ready",
+        });
+      });
+      renderUploadList();
+    }
+
+    async function refreshConfig() {
+      const data = await api("/api/config");
+      CHANNELS = data.channels || [];
+      renderChannels("dl-channels", "dl-channel", CHANNELS[0]?.name);
+      renderChannels("up-channels", "up-channel", CHANNELS[0]?.name);
+      const d = data.disk;
+      document.getElementById("disk-info").innerHTML =
+        `Free <strong>${escapeHtml(d.free_human)}</strong><br/>reserve ${escapeHtml(d.reserve_human)}`;
+      if (data.authorized) {
+        document.getElementById("auth-status").textContent = "Session present (authorized).";
+      }
+    }
+
+    // Wire
+    const dropzone = document.getElementById("dropzone");
+    const fileInput = document.getElementById("file-input");
+    dropzone.addEventListener("click", () => fileInput.click());
+    dropzone.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+    });
+    fileInput.addEventListener("change", () => { addFiles(fileInput.files); fileInput.value = ""; });
+    ["dragenter","dragover"].forEach((ev) => dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add("dragover"); }));
+    ["dragleave","drop"].forEach((ev) => dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("dragover"); }));
+    dropzone.addEventListener("drop", (e) => addFiles(e.dataTransfer.files));
+
+    document.getElementById("btn-up-clear").addEventListener("click", () => {
+      uploadItems = uploadItems.filter((f) => f.status === "queued" || f.status === "running");
+      renderUploadList();
+    });
+
+    document.getElementById("btn-authorize").addEventListener("click", async () => {
+      document.getElementById("auth-status").textContent = "Authorizing…";
+      try {
+        const job = await api("/api/authorize", { method: "POST" });
+        trackJob(job);
+      } catch (err) {
+        document.getElementById("auth-status").textContent = err.message;
+      }
+    });
+
+    document.getElementById("btn-download").addEventListener("click", async () => {
+      const links = document.getElementById("dl-links").value;
+      document.getElementById("dl-status").textContent = "Queuing…";
+      try {
+        const data = await api("/api/download", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            links,
+            channel: selectedChannel("dl-channel"),
+            custom_chat_id: document.getElementById("dl-custom-id").value,
+            combine: document.getElementById("dl-combine").checked,
+            decrypt: document.getElementById("dl-decrypt").checked,
+          }),
+        });
+        trackJob(data.job);
+        document.getElementById("dl-status").textContent = "Downloading…";
+      } catch (err) {
+        document.getElementById("dl-status").textContent = err.message;
+      }
+    });
+
+    document.getElementById("btn-upload").addEventListener("click", async () => {
+      const pending = uploadItems.filter((i) => !i.jobId);
+      if (!pending.length) {
+        document.getElementById("up-status").textContent = "Add at least one new file.";
+        return;
+      }
+      document.getElementById("up-status").textContent = "Checking disk & uploading to server…";
+      const form = new FormData();
+      form.append("channel", selectedChannel("up-channel"));
+      form.append("custom_chat_id", document.getElementById("up-custom-id").value);
+      form.append("encrypt", document.getElementById("up-encrypt").checked);
+      form.append("split", document.getElementById("up-split").checked);
+      form.append("delete_on_done", document.getElementById("up-delete").checked);
+      pending.forEach((item) => form.append("files", item.file, item.file.name));
+
+      try {
+        const res = await fetch("/api/upload", { method: "POST", body: form, credentials: "same-origin" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.detail || "Upload rejected");
+        }
+        (data.jobs || []).forEach((job, idx) => {
+          pending[idx].jobId = job.id;
+          pending[idx].status = job.status;
+          pending[idx].message = job.message;
+          trackJob(job);
+        });
+        renderUploadList();
+        document.getElementById("up-status").textContent = "Queued — processing one at a time.";
+        refreshConfig();
+      } catch (err) {
+        document.getElementById("up-status").textContent = err.message;
+      }
+    });
+
+    refreshConfig().catch((err) => {
+      document.getElementById("disk-info").textContent = err.message;
+    });
+  </script>
+</body>
+</html>

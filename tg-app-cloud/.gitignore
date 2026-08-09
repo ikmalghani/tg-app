@@ -1,0 +1,9 @@
+.env
+crypt.conf
+data/
+*.session
+*.session-journal
+__pycache__/
+*.pyc
+.venv/
+venv/
