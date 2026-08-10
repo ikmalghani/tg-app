@@ -32,6 +32,8 @@ class Job:
     payload: dict = field(default_factory=dict)
     result: dict = field(default_factory=dict)
     error: str = ""
+    command: str = ""
+    log: str = ""
     # For multi-file upload batches, parent tracks children
     file_name: str = ""
     file_size: int = 0
@@ -93,6 +95,21 @@ class JobQueue:
                 setattr(job, key, value)
         job.updated_at = time.time()
 
+    def append_log(self, job_id: str, line: str, max_chars: int = 200_000) -> None:
+        job = self._jobs.get(job_id)
+        if not job:
+            return
+        text = (line or "").rstrip("\n")
+        if not text:
+            return
+        if job.log:
+            job.log = f"{job.log}\n{text}"
+        else:
+            job.log = text
+        if len(job.log) > max_chars:
+            job.log = job.log[-max_chars:]
+        job.updated_at = time.time()
+
     def _next_queued(self) -> Optional[Job]:
         for job_id in self._order:
             job = self._jobs.get(job_id)
@@ -128,6 +145,10 @@ class JobQueue:
                 job.status = JobStatus.ERROR
                 job.error = str(exc)
                 job.message = str(exc)
+                if job.log:
+                    job.log = f"{job.log}\nERROR: {exc}"
+                else:
+                    job.log = f"ERROR: {exc}"
             finally:
                 job.updated_at = time.time()
 

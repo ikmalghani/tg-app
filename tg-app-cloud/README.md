@@ -22,14 +22,44 @@ Meant to run behind **Coolify** (or similar) with your existing Cloudflare tunne
 ```bash
 cd tg-app-cloud
 cp .env.example .env
-cp crypt.conf.example crypt.conf
-# Edit .env + crypt.conf
+# Edit .env (Telegram API credentials)
 
 mkdir -p data
 docker compose up --build -d
 ```
 
 App listens on `http://localhost:8000`.
+
+All runtime state lives under the `/data` volume:
+
+```text
+data/
+|_ downloads/          finished Telegram downloads
+|_ uploads/            staging for uploads
+|_ profile.session     Telegram auth (survives rebuild)
+|_ crypt.conf          rclone crypt config (survives rebuild)
+```
+
+## Ugreen NAS mount (required for persistence)
+
+Create/use **Shared Folder → docker → tg-app** (as in Files), then in the Docker container volume settings map that folder to **`/data`**:
+
+| Host (NAS) | Container |
+|---|---|
+| `…/docker/tg-app` (your Shared Folder path) | `/data` |
+
+Also set env:
+
+- `DATA_DIR=/data`
+- `CRYPT_CONFIG=/data/crypt.conf`
+
+Do **not** rely on anonymous Docker volumes for `/data` — rebuild/redeploy will look empty in Files even if old container layers still have files.
+
+After mounting correctly you should see in Files:
+
+`docker/tg-app/downloads/…`, `crypt.conf`, `profile.session`.
+
+Authorize once and save crypt.conf once; both persist across image updates as long as `/data` stays mounted.
 
 ## Disk guard
 
@@ -47,8 +77,9 @@ Downloads use a soft estimate (512 MiB × link count) plus the same reserve.
 ## Layout
 
 ```text
-tg-app-cloud/
+tg-app-cloud/            # Docker build context root
 |_ app/                 FastAPI + static UI
+|_ tg-upload/           # Bundled upload backend (copied into image)
 |_ data/                uploads, downloads, persisted profile.session
 |_ Dockerfile
 |_ docker-compose.yml

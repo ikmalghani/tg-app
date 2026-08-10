@@ -1,18 +1,20 @@
 services:
   app:
     build:
-      context: ..
-      dockerfile: tg-app-cloud/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     container_name: tg-app-cloud
     env_file:
       - .env
     environment:
       DATA_DIR: /data
       TG_UPLOAD_DIR: /app/tg-upload
-      CRYPT_CONFIG: /app/crypt.conf
+      # Always use the volume-backed conf (UI saves here too)
+      CRYPT_CONFIG: /data/crypt.conf
     volumes:
+      # Persist ALL runtime data here: downloads, uploads, profile.session, crypt.conf
+      # Ugreen example: mount Shared Folder/docker/tg-app → /data
       - ./data:/data
-      - ./crypt.conf:/app/crypt.conf:ro
     # Coolify (or local debug) proxies to this port. Do not expose it raw on the public internet.
     ports:
       - "8000:8000"

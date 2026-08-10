@@ -67,8 +67,8 @@
       grid-template-columns: 130px 1fr;
       gap: 8px 12px;
       align-items: start;
-      margin-bottom: 10px;
     }
+    .row { margin-bottom: 10px; }
     .row > label.field-label, .row > span.field-label { padding-top: 7px; font-size: 0.9rem; }
     .controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
     .radio, .check {
@@ -91,12 +91,13 @@
     }
     button.primary:hover:not(:disabled) { background: #7db0d0; }
     button.linkish { border: none; background: transparent; color: var(--accent-ink); text-decoration: underline; padding: 0; }
-    .actions { display: flex; justify-content: center; gap: 10px; margin-top: 6px; }
+    .actions { display: flex; justify-content: center; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
     .dropzone {
       border: 1.5px dashed var(--line); border-radius: 4px; background: #fff;
       padding: 22px 16px; text-align: center; color: var(--muted); cursor: pointer;
     }
     .dropzone:hover, .dropzone.dragover { border-color: var(--fill); background: #f3f8fb; color: var(--ink); }
+    .dropzone.compact { padding: 14px 12px; }
     .dropzone strong { color: var(--ink); }
     .file-list { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
     .file-item { background: #fff; border: 1px solid var(--line); border-radius: 3px; padding: 10px 12px; }
@@ -118,10 +119,163 @@
     .status-bar { margin-top: 8px; min-height: 1.2em; font-size: 0.82rem; color: var(--muted); text-align: center; }
     .hint { margin: 4px 0 0; font-size: 0.78rem; color: var(--muted); }
     a.dl { color: var(--ok); font-weight: 600; }
+    .log-box {
+      width: 100%;
+      min-height: 120px;
+      max-height: 240px;
+      margin-top: 10px;
+      padding: 8px 10px;
+      font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+      font-size: 0.75rem;
+      line-height: 1.4;
+      color: #1e2430;
+      background: #f1eee6;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow: auto;
+    }
+    .log-label {
+      margin: 12px 0 0;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .crypt-status {
+      font-size: 0.88rem;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .crypt-status strong.ok { color: var(--ok); }
+    .crypt-status strong.err { color: var(--err); }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(28, 26, 22, 0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 40;
+    }
+    .modal-backdrop[hidden] { display: none; }
+    .modal {
+      width: min(720px, 100%);
+      max-height: min(80vh, 640px);
+      display: flex;
+      flex-direction: column;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      box-shadow: 0 12px 40px rgba(28, 26, 22, 0.18);
+    }
+    .modal-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .modal-head h3 { margin: 0; font-size: 1rem; }
+    .modal-body {
+      padding: 12px 14px 14px;
+      overflow: auto;
+      flex: 1;
+    }
+    .modal-cmd {
+      margin: 0 0 10px;
+      padding: 8px 10px;
+      font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+      font-size: 0.75rem;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .modal-log {
+      margin: 0;
+      min-height: 220px;
+      max-height: 46vh;
+      padding: 8px 10px;
+      font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+      font-size: 0.75rem;
+      line-height: 1.4;
+      background: #f1eee6;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow: auto;
+    }
+    .modal.wide { width: min(860px, 100%); max-height: min(88vh, 760px); }
+    .explorer-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .explorer-toolbar input[type="search"] { flex: 1 1 180px; min-width: 140px; }
+    .explorer-toolbar select {
+      font: inherit; color: var(--ink); background: #fff;
+      border: 1px solid var(--line); border-radius: 3px; padding: 7px 9px;
+    }
+    .explorer-disk {
+      margin: 0 0 10px;
+      padding: 8px 10px;
+      background: #e8eef3;
+      border: 1px solid #c5d5e2;
+      border-radius: 3px;
+      font-size: 0.82rem;
+      color: var(--accent-ink);
+    }
+    .explorer-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 52vh;
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .explorer-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: center;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      padding: 10px 12px;
+    }
+    .explorer-meta { font-size: 0.75rem; color: var(--muted); margin-top: 3px; }
+    .explorer-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .explorer-actions button.danger { color: var(--err); }
+    .explorer-empty { padding: 24px 8px; text-align: center; color: var(--muted); font-size: 0.9rem; }
+    .field-with-clear {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: start;
+    }
+    .field-with-clear.top textarea { min-height: 140px; }
+    .clear-btn {
+      padding: 7px 10px;
+      font-size: 0.82rem;
+      color: var(--muted);
+      white-space: nowrap;
+      align-self: start;
+    }
     @media (max-width: 560px) {
       .row { grid-template-columns: 1fr; }
       .top { flex-direction: column; }
       .disk { text-align: left; }
+      .explorer-row { grid-template-columns: 1fr; }
+      .field-with-clear { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -139,8 +293,34 @@
       <h2 class="panel-title">Authorize</h2>
       <div class="actions">
         <button type="button" class="primary" id="btn-authorize">Authorize</button>
+        <button type="button" id="btn-auth-log" hidden>View log</button>
       </div>
       <p class="status-bar" id="auth-status"></p>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Crypt Config</h2>
+      <p class="crypt-status" id="crypt-status">Checking crypt.conf…</p>
+      <div class="row">
+        <span class="field-label">Upload file:</span>
+        <div>
+          <div class="dropzone compact" id="crypt-dropzone" tabindex="0" role="button">
+            <strong>Drop crypt.conf</strong> or click to browse
+          </div>
+          <input type="file" id="crypt-file-input" accept=".conf,text/plain" hidden />
+        </div>
+      </div>
+      <div class="row">
+        <label class="field-label" for="crypt-paste">Or paste:</label>
+        <div>
+          <textarea id="crypt-paste" placeholder="Paste full rclone crypt.conf contents here ([crypt] section required)"></textarea>
+          <p class="hint">Saved to persistent data volume and used for encrypt/decrypt.</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" class="primary" id="btn-crypt-save">Save crypt.conf</button>
+      </div>
+      <p class="status-bar" id="crypt-save-status"></p>
     </section>
 
     <section class="panel">
@@ -151,13 +331,19 @@
       </div>
       <div class="row">
         <label class="field-label" for="dl-custom-id">Custom Chat ID:</label>
-        <input type="text" id="dl-custom-id" placeholder="-100…" autocomplete="off" />
+        <div class="field-with-clear">
+          <input type="text" id="dl-custom-id" name="dl-custom-id" placeholder="-100…" autocomplete="off" spellcheck="false" data-lpignore="true" />
+          <button type="button" class="clear-btn" id="btn-dl-custom-clear" title="Clear">Clear</button>
+        </div>
       </div>
       <div class="row">
         <label class="field-label" for="dl-links">TG Links:</label>
         <div>
-          <textarea id="dl-links" placeholder="One Telegram message link per line"></textarea>
-          <p class="hint">Server downloads first, then you get the finished file(s).</p>
+          <div class="field-with-clear top">
+            <textarea id="dl-links" name="dl-links" placeholder="One Telegram message link per line" autocomplete="off" spellcheck="false" data-lpignore="true"></textarea>
+            <button type="button" class="clear-btn" id="btn-dl-links-clear" title="Clear links">Clear</button>
+          </div>
+          <p class="hint">Server downloads first, then you get the finished file(s). Links are not kept after refresh.</p>
         </div>
       </div>
       <div class="row">
@@ -170,9 +356,13 @@
       <div class="queue-banner" id="dl-queue-banner" hidden>
         <span id="dl-queue-text">Queue idle</span>
       </div>
-      <div class="file-list" id="dl-file-list"></div>
-      <div class="actions"><button type="button" id="btn-download">Download</button></div>
+      <div class="actions">
+        <button type="button" id="btn-browse-downloads">Browse File Explorer</button>
+        <button type="button" id="btn-download">Download</button>
+      </div>
       <p class="status-bar" id="dl-status"></p>
+      <p class="log-label">Log</p>
+      <pre class="log-box" id="dl-log" aria-live="polite"></pre>
     </section>
 
     <section class="panel">
@@ -183,7 +373,10 @@
       </div>
       <div class="row">
         <label class="field-label" for="up-custom-id">Custom Chat ID:</label>
-        <input type="text" id="up-custom-id" placeholder="-100…" autocomplete="off" />
+        <div class="field-with-clear">
+          <input type="text" id="up-custom-id" name="up-custom-id" placeholder="-100…" autocomplete="off" spellcheck="false" data-lpignore="true" />
+          <button type="button" class="clear-btn" id="btn-up-custom-clear" title="Clear">Clear</button>
+        </div>
       </div>
       <div class="row">
         <span class="field-label">Options:</span>
@@ -210,16 +403,68 @@
       <div class="file-list" id="up-file-list"></div>
       <div class="actions"><button type="button" id="btn-upload">Upload</button></div>
       <p class="status-bar" id="up-status"></p>
+      <p class="log-label">Log</p>
+      <pre class="log-box" id="up-log" aria-live="polite"></pre>
     </section>
+  </div>
+
+  <div class="modal-backdrop" id="auth-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
+      <div class="modal-head">
+        <h3 id="auth-modal-title">Authorize log</h3>
+        <button type="button" id="btn-auth-modal-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <p class="hint" style="margin-top:0">Command (secrets redacted)</p>
+        <pre class="modal-cmd" id="auth-modal-cmd">Waiting for command…</pre>
+        <p class="hint">Output</p>
+        <pre class="modal-log" id="auth-modal-log"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="explorer-modal" hidden>
+    <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="explorer-modal-title">
+      <div class="modal-head">
+        <h3 id="explorer-modal-title">Downloads file explorer</h3>
+        <button type="button" id="btn-explorer-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <p class="explorer-disk" id="explorer-disk">Disk: …</p>
+        <div class="explorer-toolbar">
+          <input type="search" id="explorer-search" placeholder="Search files…" autocomplete="off" />
+          <select id="explorer-filter" aria-label="Filter">
+            <option value="all">All files</option>
+            <option value="video">Video</option>
+            <option value="bin">Encrypted (.bin)</option>
+            <option value="other">Other</option>
+          </select>
+          <select id="explorer-sort" aria-label="Sort">
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="name">Name</option>
+            <option value="size">Largest</option>
+          </select>
+          <button type="button" id="btn-explorer-refresh">Refresh</button>
+        </div>
+        <div class="explorer-list" id="explorer-list"></div>
+      </div>
+    </div>
   </div>
 
   <script>
     let CHANNELS = [];
     /** @type {{ localId: string, file: File, jobId?: string, status: string, progress: number, message: string }[]} */
     let uploadItems = [];
-    /** @type {Record<string, {id:string,status:string,progress:number,message:string,result?:any,file_name?:string}>} */
+    /** @type {Record<string, {id:string,status:string,progress:number,message:string,result?:any,file_name?:string,command?:string,log?:string,kind?:string}>} */
     let trackedJobs = {};
     let pollTimer = null;
+    let lastAuthJob = null;
+    let activeUploadLogJobId = null;
+    let activeDownloadLogJobId = null;
+    let dlBannerTimer = null;
+    let dlBannerJobId = null;
+    let explorerFiles = [];
 
     function escapeHtml(s) {
       return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
@@ -240,6 +485,47 @@
         throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
       }
       return data;
+    }
+
+    function setLogBox(el, text, stickToBottom = true) {
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+      el.textContent = text || "";
+      if (stickToBottom && nearBottom) el.scrollTop = el.scrollHeight;
+    }
+
+    function updateAuthModal(job) {
+      if (!job) return;
+      lastAuthJob = job;
+      document.getElementById("btn-auth-log").hidden = false;
+      document.getElementById("auth-modal-cmd").textContent = job.command || "Waiting for command…";
+      const logEl = document.getElementById("auth-modal-log");
+      const nearBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 48;
+      logEl.textContent = job.log || "";
+      if (nearBottom) logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function openAuthModal() {
+      document.getElementById("auth-modal").hidden = false;
+      if (lastAuthJob) updateAuthModal(lastAuthJob);
+    }
+
+    function closeAuthModal() {
+      document.getElementById("auth-modal").hidden = true;
+    }
+
+    function renderCryptStatus(crypt) {
+      const el = document.getElementById("crypt-status");
+      if (!crypt) {
+        el.innerHTML = "crypt.conf status unknown.";
+        return;
+      }
+      if (crypt.configured) {
+        el.innerHTML = `crypt.conf: <strong class="ok">ready</strong> (${escapeHtml(crypt.size_human)})`;
+      } else if (crypt.exists) {
+        el.innerHTML = `crypt.conf: <strong class="err">incomplete</strong> (empty passwords) — paste your real rclone crypt config and Save.`;
+      } else {
+        el.innerHTML = `crypt.conf: <strong class="err">missing</strong> — upload or paste below before encrypt/decrypt.`;
+      }
     }
 
     function renderChannels(containerId, groupName, selected) {
@@ -289,29 +575,48 @@
       });
     }
 
-    function renderDownloadJob(job) {
-      const list = document.getElementById("dl-file-list");
+    function updateDownloadBanner(job) {
       const banner = document.getElementById("dl-queue-banner");
-      banner.hidden = false;
-      document.getElementById("dl-queue-text").textContent = `Job ${job.id} · ${job.status}`;
-      const cls = job.status === "done" ? "ok" : job.status === "error" ? "err" : "warn";
-      let linksHtml = "";
-      if (job.status === "done" && job.result && job.result.files) {
-        linksHtml = job.result.files.map((rel) => {
-          const name = rel.split("/").pop();
-          return `<div><a class="dl" href="/api/files/${job.id}/${encodeURIComponent(name)}">${escapeHtml(name)}</a></div>`;
-        }).join("");
+      const textEl = document.getElementById("dl-queue-text");
+      if (!job) {
+        banner.hidden = true;
+        return;
       }
-      list.innerHTML = `
-        <div class="file-item">
-          <div class="file-head">
-            <div class="file-name">${escapeHtml(job.file_name || "Download")}</div>
-            <div class="file-meta">${escapeHtml(job.id)}</div>
-          </div>
-          <div class="progress"><span style="width:${job.progress || 0}%"></span></div>
-          <div class="file-status ${cls}">${escapeHtml(job.message || "")}</div>
-          ${linksHtml}
-        </div>`;
+
+      // New job → show again and cancel any previous hide timer
+      if (job.id !== dlBannerJobId) {
+        dlBannerJobId = job.id;
+        if (dlBannerTimer) {
+          clearTimeout(dlBannerTimer);
+          dlBannerTimer = null;
+        }
+      }
+
+      if (job.status === "queued" || job.status === "running") {
+        if (dlBannerTimer) {
+          clearTimeout(dlBannerTimer);
+          dlBannerTimer = null;
+        }
+        banner.hidden = false;
+        textEl.textContent = `Job ${job.id} · ${job.status}` +
+          (job.progress ? ` · ${Math.round(job.progress)}%` : "");
+        return;
+      }
+
+      // done / error — show once for 30s, then hide forever for this job
+      if (dlBannerTimer === "done") {
+        banner.hidden = true;
+        return;
+      }
+      banner.hidden = false;
+      textEl.textContent = `Job ${job.id} · ${job.status}` +
+        (job.message ? ` · ${job.message}` : "");
+      if (!dlBannerTimer) {
+        dlBannerTimer = setTimeout(() => {
+          banner.hidden = true;
+          dlBannerTimer = "done";
+        }, 30000);
+      }
     }
 
     function ensurePolling() {
@@ -357,14 +662,122 @@
           item.message = job.message || job.status;
           renderUploadList();
         }
+        if (!activeUploadLogJobId || activeUploadLogJobId === job.id || job.status === "running") {
+          activeUploadLogJobId = job.id;
+          setLogBox(document.getElementById("up-log"), job.log || "");
+        }
       } else if (job.kind === "download") {
-        renderDownloadJob(job);
+        updateDownloadBanner(job);
         document.getElementById("dl-status").textContent =
-          job.status === "done" ? "Download complete." :
+          job.status === "done" ? "Download complete. Use Browse File Explorer to get files." :
           job.status === "error" ? job.message : "Downloading…";
+        activeDownloadLogJobId = job.id;
+        setLogBox(document.getElementById("dl-log"), job.log || "");
       } else if (job.kind === "authorize") {
         document.getElementById("auth-status").textContent = job.message || job.status;
+        updateAuthModal(job);
       }
+    }
+
+    function formatMtime(ts) {
+      try {
+        return new Date(ts * 1000).toLocaleString();
+      } catch (_) {
+        return "";
+      }
+    }
+
+    function fileKind(name) {
+      const lower = name.toLowerCase();
+      if (lower.endsWith(".bin")) return "bin";
+      if (/\.(mkv|mp4|avi|mov|webm|m4v|ts|wmv)$/i.test(lower)) return "video";
+      return "other";
+    }
+
+    function filteredExplorerFiles() {
+      const q = (document.getElementById("explorer-search").value || "").trim().toLowerCase();
+      const filter = document.getElementById("explorer-filter").value;
+      const sort = document.getElementById("explorer-sort").value;
+      let list = explorerFiles.slice();
+      if (filter !== "all") {
+        list = list.filter((f) => fileKind(f.name) === filter);
+      }
+      if (q) {
+        list = list.filter((f) =>
+          f.name.toLowerCase().includes(q) ||
+          f.path.toLowerCase().includes(q) ||
+          (f.job_id || "").toLowerCase().includes(q)
+        );
+      }
+      if (sort === "newest") list.sort((a, b) => b.mtime - a.mtime);
+      else if (sort === "oldest") list.sort((a, b) => a.mtime - b.mtime);
+      else if (sort === "name") list.sort((a, b) => a.name.localeCompare(b.name));
+      else if (sort === "size") list.sort((a, b) => b.size - a.size);
+      return list;
+    }
+
+    function renderExplorerList() {
+      const list = document.getElementById("explorer-list");
+      const files = filteredExplorerFiles();
+      if (!files.length) {
+        const total = explorerFiles.length;
+        list.innerHTML = `<div class="explorer-empty">${
+          total ? "No files match filters." : "No files in /data/downloads yet."
+        }</div>`;
+        return;
+      }
+      list.innerHTML = files.map((f) => `
+        <div class="explorer-row" data-path="${escapeHtml(f.path)}">
+          <div>
+            <div class="file-name">${escapeHtml(f.name)}</div>
+            <div class="explorer-meta">${escapeHtml(f.path)} · ${escapeHtml(f.size_human)} · ${escapeHtml(formatMtime(f.mtime))}</div>
+          </div>
+          <div class="explorer-actions">
+            <button type="button" data-action="download">Download</button>
+            <button type="button" class="danger" data-action="delete">Delete</button>
+          </div>
+        </div>`).join("");
+    }
+
+    function updateExplorerDisk(disk, meta = {}) {
+      if (!disk) return;
+      const root = meta.root ? ` · root ${meta.root}` : "";
+      const err = (meta.errors && meta.errors.length)
+        ? ` · read errors: ${meta.errors.length}`
+        : "";
+      document.getElementById("explorer-disk").innerHTML =
+        `Free <strong>${escapeHtml(disk.free_human)}</strong>` +
+        ` · used ${escapeHtml(disk.used_human || "—")}` +
+        ` / ${escapeHtml(disk.total_human || "—")}` +
+        ` · reserve ${escapeHtml(disk.reserve_human || "—")}` +
+        ` · ${explorerFiles.length} file(s)` +
+        escapeHtml(root) + escapeHtml(err);
+    }
+
+    async function loadExplorerFiles() {
+      const data = await api("/api/downloads/files");
+      explorerFiles = data.files || [];
+      updateExplorerDisk(data.disk, { root: data.root, errors: data.errors });
+      renderExplorerList();
+      if (data.disk && data.disk.free_human) {
+        document.getElementById("disk-info").innerHTML =
+          `Free <strong>${escapeHtml(data.disk.free_human)}</strong><br/>reserve ${escapeHtml(data.disk.reserve_human || "")}`;
+      }
+    }
+
+    async function openExplorerModal() {
+      document.getElementById("explorer-modal").hidden = false;
+      document.getElementById("explorer-list").innerHTML = `<div class="explorer-empty">Loading…</div>`;
+      try {
+        await loadExplorerFiles();
+      } catch (err) {
+        document.getElementById("explorer-list").innerHTML =
+          `<div class="explorer-empty">${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    function closeExplorerModal() {
+      document.getElementById("explorer-modal").hidden = true;
     }
 
     function addFiles(fileList) {
@@ -391,6 +804,43 @@
       if (data.authorized) {
         document.getElementById("auth-status").textContent = "Session present (authorized).";
       }
+      renderCryptStatus(data.crypt);
+    }
+
+    async function saveCryptFromText(text) {
+      document.getElementById("crypt-save-status").textContent = "Saving…";
+      try {
+        const data = await api("/api/crypt-config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: text }),
+        });
+        renderCryptStatus(data.crypt);
+        document.getElementById("crypt-save-status").textContent = "crypt.conf saved.";
+      } catch (err) {
+        document.getElementById("crypt-save-status").textContent = err.message;
+      }
+    }
+
+    async function saveCryptFromFile(file) {
+      if (!file) return;
+      document.getElementById("crypt-save-status").textContent = `Uploading ${file.name}…`;
+      const form = new FormData();
+      form.append("file", file, file.name);
+      try {
+        const res = await fetch("/api/crypt-config/upload", {
+          method: "POST",
+          body: form,
+          credentials: "same-origin",
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "Upload failed");
+        renderCryptStatus(data.crypt);
+        document.getElementById("crypt-save-status").textContent = "crypt.conf saved from file.";
+        document.getElementById("crypt-paste").value = "";
+      } catch (err) {
+        document.getElementById("crypt-save-status").textContent = err.message;
+      }
     }
 
     // Wire
@@ -405,6 +855,28 @@
     ["dragleave","drop"].forEach((ev) => dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("dragover"); }));
     dropzone.addEventListener("drop", (e) => addFiles(e.dataTransfer.files));
 
+    const cryptDrop = document.getElementById("crypt-dropzone");
+    const cryptInput = document.getElementById("crypt-file-input");
+    cryptDrop.addEventListener("click", () => cryptInput.click());
+    cryptDrop.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); cryptInput.click(); }
+    });
+    cryptInput.addEventListener("change", () => {
+      const file = cryptInput.files && cryptInput.files[0];
+      cryptInput.value = "";
+      saveCryptFromFile(file);
+    });
+    ["dragenter","dragover"].forEach((ev) => cryptDrop.addEventListener(ev, (e) => { e.preventDefault(); cryptDrop.classList.add("dragover"); }));
+    ["dragleave","drop"].forEach((ev) => cryptDrop.addEventListener(ev, (e) => { e.preventDefault(); cryptDrop.classList.remove("dragover"); }));
+    cryptDrop.addEventListener("drop", (e) => {
+      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      saveCryptFromFile(file);
+    });
+
+    document.getElementById("btn-crypt-save").addEventListener("click", () => {
+      saveCryptFromText(document.getElementById("crypt-paste").value);
+    });
+
     document.getElementById("btn-up-clear").addEventListener("click", () => {
       uploadItems = uploadItems.filter((f) => f.status === "queued" || f.status === "running");
       renderUploadList();
@@ -412,17 +884,78 @@
 
     document.getElementById("btn-authorize").addEventListener("click", async () => {
       document.getElementById("auth-status").textContent = "Authorizing…";
+      document.getElementById("auth-modal-cmd").textContent = "Waiting for command…";
+      document.getElementById("auth-modal-log").textContent = "";
+      openAuthModal();
       try {
         const job = await api("/api/authorize", { method: "POST" });
         trackJob(job);
       } catch (err) {
         document.getElementById("auth-status").textContent = err.message;
+        document.getElementById("auth-modal-log").textContent = err.message;
       }
+    });
+
+    document.getElementById("btn-auth-log").addEventListener("click", openAuthModal);
+    document.getElementById("btn-auth-modal-close").addEventListener("click", closeAuthModal);
+    document.getElementById("auth-modal").addEventListener("click", (e) => {
+      if (e.target.id === "auth-modal") closeAuthModal();
+    });
+    document.getElementById("btn-explorer-close").addEventListener("click", closeExplorerModal);
+    document.getElementById("explorer-modal").addEventListener("click", (e) => {
+      if (e.target.id === "explorer-modal") closeExplorerModal();
+    });
+    document.getElementById("btn-browse-downloads").addEventListener("click", openExplorerModal);
+    document.getElementById("btn-explorer-refresh").addEventListener("click", () => {
+      loadExplorerFiles().catch((err) => {
+        document.getElementById("explorer-list").innerHTML =
+          `<div class="explorer-empty">${escapeHtml(err.message)}</div>`;
+      });
+    });
+    document.getElementById("explorer-search").addEventListener("input", renderExplorerList);
+    document.getElementById("explorer-filter").addEventListener("change", renderExplorerList);
+    document.getElementById("explorer-sort").addEventListener("change", renderExplorerList);
+    document.getElementById("explorer-list").addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      const row = btn.closest(".explorer-row");
+      if (!row) return;
+      const path = row.getAttribute("data-path");
+      if (!path) return;
+      if (btn.dataset.action === "download") {
+        window.location.href = `/api/downloads/file?path=${encodeURIComponent(path)}`;
+        return;
+      }
+      if (btn.dataset.action === "delete") {
+        if (!confirm(`Delete ${path}?`)) return;
+        btn.disabled = true;
+        try {
+          await api("/api/downloads/file", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path }),
+          });
+          await loadExplorerFiles();
+        } catch (err) {
+          alert(err.message);
+          btn.disabled = false;
+        }
+      }
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      closeAuthModal();
+      closeExplorerModal();
     });
 
     document.getElementById("btn-download").addEventListener("click", async () => {
       const links = document.getElementById("dl-links").value;
       document.getElementById("dl-status").textContent = "Queuing…";
+      setLogBox(document.getElementById("dl-log"), "", false);
+      // Reset banner visibility for the new job
+      if (dlBannerTimer && dlBannerTimer !== "done") clearTimeout(dlBannerTimer);
+      dlBannerTimer = null;
+      dlBannerJobId = null;
       try {
         const data = await api("/api/download", {
           method: "POST",
@@ -439,6 +972,7 @@
         document.getElementById("dl-status").textContent = "Downloading…";
       } catch (err) {
         document.getElementById("dl-status").textContent = err.message;
+        setLogBox(document.getElementById("dl-log"), err.message, false);
       }
     });
 
@@ -449,6 +983,7 @@
         return;
       }
       document.getElementById("up-status").textContent = "Checking disk & uploading to server…";
+      setLogBox(document.getElementById("up-log"), "", false);
       const form = new FormData();
       form.append("channel", selectedChannel("up-channel"));
       form.append("custom_chat_id", document.getElementById("up-custom-id").value);
@@ -469,13 +1004,37 @@
           pending[idx].message = job.message;
           trackJob(job);
         });
+        if (data.jobs && data.jobs[0]) activeUploadLogJobId = data.jobs[0].id;
         renderUploadList();
         document.getElementById("up-status").textContent = "Queued — processing one at a time.";
         refreshConfig();
       } catch (err) {
         document.getElementById("up-status").textContent = err.message;
+        setLogBox(document.getElementById("up-log"), err.message, false);
       }
     });
+
+    document.getElementById("btn-dl-links-clear").addEventListener("click", () => {
+      document.getElementById("dl-links").value = "";
+      document.getElementById("dl-links").focus();
+    });
+    document.getElementById("btn-dl-custom-clear").addEventListener("click", () => {
+      document.getElementById("dl-custom-id").value = "";
+      document.getElementById("dl-custom-id").focus();
+    });
+    document.getElementById("btn-up-custom-clear").addEventListener("click", () => {
+      document.getElementById("up-custom-id").value = "";
+      document.getElementById("up-custom-id").focus();
+    });
+
+    function clearEphemeralFields() {
+      document.getElementById("dl-links").value = "";
+      document.getElementById("dl-custom-id").value = "";
+      document.getElementById("up-custom-id").value = "";
+    }
+    // Browsers may restore form values on refresh / back-forward cache — force clear
+    clearEphemeralFields();
+    window.addEventListener("pageshow", clearEphemeralFields);
 
     refreshConfig().catch((err) => {
       document.getElementById("disk-info").textContent = err.message;

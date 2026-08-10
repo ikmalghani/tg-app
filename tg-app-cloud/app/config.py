@@ -61,14 +61,19 @@ def get_settings():
     for sub in ("uploads", "downloads", "jobs"):
         os.makedirs(os.path.join(data_dir, sub), exist_ok=True)
 
-    crypt_path = os.getenv("CRYPT_CONFIG", os.path.join(base_dir, "crypt.conf"))
+    crypt_path = os.path.join(data_dir, "crypt.conf")
+    env_crypt = os.getenv("CRYPT_CONFIG", "").strip()
+    # Prefer volume file; fall back to CRYPT_CONFIG only if volume file is missing
+    if not os.path.isfile(crypt_path) and env_crypt and os.path.isfile(env_crypt):
+        crypt_path = env_crypt
+    data_crypt = os.path.join(data_dir, "crypt.conf")
     tg_upload_dir = os.getenv(
         "TG_UPLOAD_DIR",
-        os.path.join(os.path.dirname(base_dir), "tg-upload"),
+        os.path.join(base_dir, "tg-upload"),
     )
     if not os.path.isdir(tg_upload_dir):
-        # Docker image layout
-        alt = os.path.join(base_dir, "tg-upload")
+        # Repo-root layout (desktop sibling of tg-app-cloud)
+        alt = os.path.join(os.path.dirname(base_dir), "tg-upload")
         if os.path.isdir(alt):
             tg_upload_dir = alt
 
@@ -84,6 +89,7 @@ def get_settings():
         "downloads_dir": os.path.join(data_dir, "downloads"),
         "jobs_dir": os.path.join(data_dir, "jobs"),
         "crypt_config": crypt_path,
+        "crypt_config_writable": data_crypt,
         "tg_upload_dir": tg_upload_dir,
         "api_id": os.getenv("API_ID", "").strip(),
         "api_hash": os.getenv("API_HASH", "").strip(),

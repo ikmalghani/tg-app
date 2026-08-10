@@ -119,7 +119,10 @@ def get_tg_upload_python():
 def run_tg_upload(arguments, on_progress: Optional[ProgressCallback] = None):
     settings = get_settings()
     command_args = [get_tg_upload_python(), "-u", "tg-upload.py", *arguments]
-    _log(f"Executing command: {' '.join(command_args)}")
+    cmd_str = " ".join(command_args)
+    _log(f"Executing command: {cmd_str}")
+    if on_progress:
+        on_progress("command", -1, cmd_str)
     result = run_subprocess(
         command_args,
         working_directory=settings["tg_upload_dir"],
@@ -131,9 +134,13 @@ def run_tg_upload(arguments, on_progress: Optional[ProgressCallback] = None):
     return result
 
 
-def encrypt_decrypt(is_encrypt, file_or_folders, config_file_path):
+def encrypt_decrypt(is_encrypt, file_or_folders, config_file_path, on_progress: Optional[ProgressCallback] = None):
     if not os.path.exists(config_file_path):
         raise FileNotFoundError(f"Config file not found at {config_file_path}")
+    if not _crypt_passwords_configured(config_file_path):
+        raise RuntimeError(
+            "crypt.conf has empty passwords — paste/upload a real rclone crypt config in Crypt Config"
+        )
 
     settings = get_settings()
     for file_or_folder in file_or_folders:
@@ -163,11 +170,35 @@ def encrypt_decrypt(is_encrypt, file_or_folders, config_file_path):
         else:
             raise FileNotFoundError(f"Invalid file path: {file_or_folder}")
 
-        result = run_subprocess_passthrough(command_args, working_directory=file_directory)
+        result = run_subprocess(
+            command_args,
+            working_directory=file_directory,
+            on_progress=on_progress,
+        )
         if result.returncode != 0:
             action = "encrypt" if is_encrypt else "decrypt"
-            raise RuntimeError(f"Failed to {action} {basename}")
+            detail = (result.stdout or "").strip() or "rclone failed"
+            raise RuntimeError(f"Failed to {action} {basename}: {detail[-800:]}")
         time.sleep(0.5)
+
+
+def _crypt_passwords_configured(config_file_path: str) -> bool:
+    try:
+        with open(config_file_path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return False
+    if "[crypt]" not in text:
+        return False
+    values = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() in ("password", "password2"):
+            values.append(value.strip().strip('"').strip("'"))
+    return len(values) >= 2 and all(values)
 
 
 def encrypt_file_for_upload(file_path, config_file_path):
@@ -178,11 +209,11 @@ def encrypt_file_for_upload(file_path, config_file_path):
     return encrypted_path
 
 
-def decrypt_files_in_directory(directory, config_file_path):
+def decrypt_files_in_directory(directory, config_file_path, on_progress: Optional[ProgressCallback] = None):
     for entry in sorted(os.listdir(directory)):
         file_path = os.path.join(directory, entry)
         if os.path.isfile(file_path) and entry.lower().endswith(".bin"):
-            encrypt_decrypt(False, [file_path], config_file_path)
+            encrypt_decrypt(False, [file_path], config_file_path, on_progress=on_progress)
 
 
 def split_file(file_path, split_size=1500 * 1024 * 1024):
@@ -413,16 +444,91 @@ def process_upload_file(
         on_progress("stage", 100, "Uploaded to Telegram")
 
 
+def rename_files_with_captions(directory, links_list):
+    """Rename downloaded files to use their captions from Telegram messages."""
+    if not links_list or not directory or not os.path.exists(directory):
+        return
+
+    link_to_caption = {}
+    for link in links_list:
+        caption = get_caption_from_link(link)
+        if caption:
+            link_to_caption[link] = caption
+    if not link_to_caption:
+        _log("SKIPPED: Caption rename - could not resolve captions from links")
+        return
+
+    files = [
+        name for name in os.listdir(directory)
+        if os.path.isfile(os.path.join(directory, name))
+    ]
+    used_captions = set()
+    for file_name in files:
+        if ".part" in file_name:
+            continue
+        file_path = os.path.join(directory, file_name)
+        for _link, caption in link_to_caption.items():
+            if caption in used_captions:
+                continue
+            caption_base = caption.replace(".bin", "").lower().replace("_", ".").replace("-", ".")
+            file_base = file_name.replace(".bin", "").lower().replace("_", ".").replace("-", ".")
+            matched = False
+            if file_base == caption_base:
+                matched = True
+            elif file_base in caption_base or caption_base in file_base:
+                if min(len(file_base), len(caption_base)) >= 10:
+                    matched = True
+            elif len(file_base) >= 10 and len(caption_base) >= 10:
+                if (
+                    file_base[:10] in caption_base
+                    or caption_base[:10] in file_base
+                    or file_base[-10:] in caption_base
+                    or caption_base[-10:] in file_base
+                ):
+                    matched = True
+            if matched:
+                new_file_path = os.path.join(directory, caption)
+                if file_path != new_file_path and not os.path.exists(new_file_path):
+                    try:
+                        os.rename(file_path, new_file_path)
+                        used_captions.add(caption)
+                        _log(f"Renamed: {file_name} -> {caption}")
+                    except OSError as exc:
+                        _log(f"Error renaming {file_name} to {caption}: {exc}")
+                elif file_path == new_file_path:
+                    used_captions.add(caption)
+                break
+
+
+def _unique_dest(directory: str, filename: str) -> str:
+    dest = os.path.join(directory, filename)
+    if not os.path.exists(dest):
+        return dest
+    stem, ext = os.path.splitext(filename)
+    for i in range(1, 1000):
+        candidate = os.path.join(directory, f"{stem}_{i}{ext}")
+        if not os.path.exists(candidate):
+            return candidate
+    return os.path.join(directory, f"{stem}_{os.urandom(3).hex()}{ext}")
+
+
 def process_download(
     links: list[str],
     chat_id: str,
     combine: bool,
     decrypt: bool,
-    job_dir: str,
     on_progress: Optional[ProgressCallback] = None,
 ):
+    """
+    Download into a temp work dir, post-process, then move finished files
+    flat into /data/downloads (e.g. /data/downloads/video.mkv).
+    """
     settings = get_settings()
-    os.makedirs(job_dir, exist_ok=True)
+    downloads_dir = settings["downloads_dir"]
+    os.makedirs(downloads_dir, exist_ok=True)
+    os.makedirs(settings["jobs_dir"], exist_ok=True)
+
+    work_dir = tempfile.mkdtemp(prefix="dl_", dir=settings["jobs_dir"])
     temp_file = None
 
     if on_progress:
@@ -431,43 +537,58 @@ def process_download(
     command_args = [
         "--profile", "profile",
         "--chat_id", str(chat_id),
-        "--dl_dir", job_dir,
+        "--dl_dir", work_dir,
     ]
     if len(links) == 1:
         command_args.extend(["--dl", "--links", links[0]])
     else:
         temp_file = tempfile.NamedTemporaryFile(
-            mode="w", delete=False, suffix=".txt", prefix="tg_links_", dir=job_dir
+            mode="w", delete=False, suffix=".txt", prefix="tg_links_", dir=settings["jobs_dir"]
         )
         temp_file.write("\n".join(links))
         temp_file.close()
         command_args.extend(["--dl", "--txt_file", temp_file.name])
 
     try:
-        run_tg_upload(command_args, on_progress=on_progress)
-    finally:
-        if temp_file and os.path.exists(temp_file.name):
-            os.remove(temp_file.name)
+        try:
+            run_tg_upload(command_args, on_progress=on_progress)
+        finally:
+            if temp_file and os.path.exists(temp_file.name):
+                os.remove(temp_file.name)
 
-    if on_progress:
-        on_progress("stage", 70, "Post-processing…")
-
-    if combine:
-        combine_files(job_dir, links)
-
-    if decrypt:
-        config_file_path = settings["crypt_config"]
-        if not os.path.exists(config_file_path):
-            raise FileNotFoundError(f"crypt.conf not found: {config_file_path}")
         if on_progress:
-            on_progress("stage", 85, "Decrypting…")
-        decrypt_files_in_directory(job_dir, config_file_path)
+            on_progress("stage", 70, "Post-processing…")
 
-    result_files = [
-        os.path.join(job_dir, name)
-        for name in sorted(os.listdir(job_dir))
-        if os.path.isfile(os.path.join(job_dir, name))
-    ]
-    if on_progress:
-        on_progress("stage", 100, f"Ready ({len(result_files)} file(s))")
-    return result_files
+        if combine:
+            combine_files(work_dir, links)
+
+        # Always rename by caption (covers single-file downloads when combine finds no parts)
+        rename_files_with_captions(work_dir, links)
+
+        if decrypt:
+            config_file_path = settings["crypt_config"]
+            if not os.path.exists(config_file_path):
+                raise FileNotFoundError(f"crypt.conf not found: {config_file_path}")
+            if not _crypt_passwords_configured(config_file_path):
+                raise RuntimeError(
+                    "crypt.conf has empty passwords — paste/upload a real rclone crypt config first"
+                )
+            if on_progress:
+                on_progress("stage", 85, "Decrypting…")
+            decrypt_files_in_directory(work_dir, config_file_path, on_progress=on_progress)
+
+        result_files = []
+        for name in sorted(os.listdir(work_dir)):
+            src = os.path.join(work_dir, name)
+            if not os.path.isfile(src):
+                continue
+            dest = _unique_dest(downloads_dir, name)
+            shutil.move(src, dest)
+            result_files.append(dest)
+            _log(f"Saved: {dest}")
+
+        if on_progress:
+            on_progress("stage", 100, f"Ready ({len(result_files)} file(s))")
+        return result_files
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)

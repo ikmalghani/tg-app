@@ -1,0 +1,11 @@
+data/
+.env
+crypt.conf
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+**/*.session
+**/*.session-journal
+.git/
+*.md
