@@ -1,6 +1,9 @@
 import os
 import re
 import shutil
+import threading
+import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -19,6 +22,12 @@ from . import pipeline
 from .worker import JobKind, JobStatus, job_queue
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+# Chunked uploads stay under Cloudflare's ~100 MiB request body limit.
+UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
+_upload_sessions: dict[str, dict] = {}
+_upload_sessions_lock = threading.Lock()
+_UPLOAD_SESSION_TTL_SEC = 6 * 60 * 60
 
 
 def _redact_command(command: str) -> str:
@@ -151,6 +160,49 @@ def _session_present() -> bool:
         os.path.join(settings["data_dir"], "profile.session"),
     ]
     return any(os.path.isfile(p) for p in paths)
+
+
+def _purge_stale_upload_sessions() -> None:
+    now = time.time()
+    with _upload_sessions_lock:
+        stale = [
+            sid
+            for sid, sess in _upload_sessions.items()
+            if now - sess.get("updated_at", sess.get("created_at", 0)) > _UPLOAD_SESSION_TTL_SEC
+        ]
+        for sid in stale:
+            sess = _upload_sessions.pop(sid, None)
+            if not sess:
+                continue
+            path = sess.get("path")
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+
+def _get_upload_session(upload_id: str) -> dict:
+    _purge_stale_upload_sessions()
+    with _upload_sessions_lock:
+        sess = _upload_sessions.get(upload_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Upload session not found or expired")
+    return sess
+
+
+def _remove_upload_session(upload_id: str, delete_file: bool = False) -> None:
+    with _upload_sessions_lock:
+        sess = _upload_sessions.pop(upload_id, None)
+    if not sess:
+        return
+    if delete_file:
+        path = sess.get("path")
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def _register_handlers():
@@ -390,6 +442,168 @@ async def api_upload(
     except Exception as exc:
         _cleanup_saved()
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/upload/init")
+async def api_upload_init(request: Request):
+    """Start a chunked upload session (Cloudflare-safe; chunks stay under ~100 MiB)."""
+    settings = get_settings()
+    body = await request.json()
+    filename = os.path.basename(str(body.get("filename") or "upload.bin"))
+    try:
+        size = int(body.get("size", 0))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid file size") from exc
+    if size < 0:
+        raise HTTPException(status_code=400, detail="Invalid file size")
+
+    channel = str(body.get("channel") or "Custom Channel")
+    custom_chat_id = str(body.get("custom_chat_id") or "")
+    encrypt = bool(body.get("encrypt", True))
+    split = bool(body.get("split", True))
+    delete_on_done = bool(body.get("delete_on_done", True))
+    chat_id = _resolve_chat_id(channel, custom_chat_id)
+
+    required = estimate_upload_bytes(size, encrypt=encrypt, split=split)
+    check = check_free_space(settings["data_dir"], required, settings["disk_reserve_bytes"])
+    if not check.ok:
+        raise HTTPException(status_code=507, detail=check.message)
+
+    uploads_dir = settings["uploads_dir"]
+    os.makedirs(uploads_dir, exist_ok=True)
+    dest = os.path.join(uploads_dir, filename)
+    if os.path.exists(dest):
+        stem, ext = os.path.splitext(filename)
+        dest = os.path.join(uploads_dir, f"{stem}_{os.urandom(3).hex()}{ext}")
+
+    # Pre-create empty file so later chunks can seek/append safely.
+    open(dest, "wb").close()
+    upload_id = uuid.uuid4().hex
+    now = time.time()
+    with _upload_sessions_lock:
+        _upload_sessions[upload_id] = {
+            "path": dest,
+            "filename": os.path.basename(dest),
+            "expected_size": size,
+            "received": 0,
+            "chat_id": chat_id,
+            "encrypt": encrypt,
+            "split": split,
+            "delete_on_done": delete_on_done,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    return {
+        "ok": True,
+        "upload_id": upload_id,
+        "chunk_size": UPLOAD_CHUNK_SIZE,
+        "disk_check": check.__dict__,
+    }
+
+
+@app.put("/api/upload/{upload_id}/chunk")
+async def api_upload_chunk(upload_id: str, request: Request, offset: int = 0):
+    sess = _get_upload_session(upload_id)
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="Invalid chunk offset")
+    if offset != sess["received"]:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Unexpected chunk offset {offset}; expected {sess['received']}",
+        )
+
+    expected = sess["expected_size"]
+    path = sess["path"]
+    data = await request.body()
+
+    if not data:
+        if offset >= expected:
+            return {"ok": True, "received": sess["received"], "expected": expected}
+        raise HTTPException(status_code=400, detail="Empty chunk body")
+
+    if offset + len(data) > expected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Chunk exceeds declared size ({format_bytes(expected)})",
+        )
+
+    settings = get_settings()
+    tentative = estimate_upload_bytes(
+        max(offset + len(data), 1),
+        encrypt=sess["encrypt"],
+        split=sess["split"],
+    )
+    check = check_free_space(settings["data_dir"], tentative, settings["disk_reserve_bytes"])
+    if not check.ok:
+        raise HTTPException(status_code=507, detail=check.message)
+
+    with open(path, "r+b") as out:
+        out.seek(offset)
+        out.write(data)
+        written = len(data)
+
+    with _upload_sessions_lock:
+        current = _upload_sessions.get(upload_id)
+        if not current:
+            raise HTTPException(status_code=404, detail="Upload session not found or expired")
+        current["received"] = offset + written
+        current["updated_at"] = time.time()
+        received = current["received"]
+
+    return {
+        "ok": True,
+        "received": received,
+        "expected": expected,
+        "written": written,
+    }
+
+
+@app.post("/api/upload/{upload_id}/complete")
+async def api_upload_complete(upload_id: str):
+    sess = _get_upload_session(upload_id)
+    path = sess["path"]
+    expected = sess["expected_size"]
+    received = sess["received"]
+    if not os.path.isfile(path):
+        _remove_upload_session(upload_id, delete_file=True)
+        raise HTTPException(status_code=400, detail="Upload file missing on server")
+    actual = os.path.getsize(path)
+    if received != expected or actual != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Incomplete upload: got {format_bytes(actual)} "
+                f"(session {format_bytes(received)}), expected {format_bytes(expected)}"
+            ),
+        )
+
+    settings = get_settings()
+    required = estimate_upload_bytes(actual, encrypt=sess["encrypt"], split=sess["split"])
+    check = check_free_space(settings["data_dir"], required, settings["disk_reserve_bytes"])
+    if not check.ok:
+        raise HTTPException(status_code=507, detail=check.message)
+
+    job = job_queue.enqueue(
+        JobKind.UPLOAD,
+        {
+            "path": path,
+            "chat_id": sess["chat_id"],
+            "encrypt": sess["encrypt"],
+            "split": sess["split"],
+            "delete_on_done": sess["delete_on_done"],
+        },
+        file_name=sess["filename"],
+        file_size=actual,
+    )
+    _remove_upload_session(upload_id, delete_file=False)
+    return {"ok": True, "job": _job_to_dict(job), "disk_check": check.__dict__}
+
+
+@app.delete("/api/upload/{upload_id}")
+async def api_upload_abort(upload_id: str):
+    _remove_upload_session(upload_id, delete_file=True)
+    return {"ok": True}
 
 
 @app.post("/api/download")

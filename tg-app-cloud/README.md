@@ -74,6 +74,10 @@ If it will not fit, upload returns **HTTP 507** with a clear message.
 
 Downloads use a soft estimate (512 MiB × link count) plus the same reserve.
 
+## Large uploads (Cloudflare)
+
+The UI uploads files in **8 MiB chunks** (`/api/upload/init` → `/chunk` → `/complete`). That stays under Cloudflare’s ~100 MiB request body limit so multi‑GB videos work through Access / tunnel. Do not rely on a single multipart POST for large files behind Cloudflare.
+
 ## Layout
 
 ```text

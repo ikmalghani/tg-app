@@ -391,7 +391,7 @@
         <div>
           <div class="dropzone" id="dropzone" tabindex="0" role="button">
             <strong>Drop files here</strong> or click to browse<br />
-            <span style="font-size:0.82rem">Multiple files · queued one at a time · disk-checked before accept</span>
+            <span style="font-size:0.82rem">Multiple files · chunked upload (Cloudflare-safe) · queued one at a time</span>
           </div>
           <input type="file" id="file-input" multiple hidden />
         </div>
@@ -477,14 +477,87 @@
     }
     function uid() { return Math.random().toString(36).slice(2, 10); }
 
+    function formatApiError(data, res, fallback = "Request failed") {
+      const d = data && data.detail;
+      if (typeof d === "string" && d.trim()) return d;
+      if (Array.isArray(d)) {
+        return d.map((x) => (typeof x === "string" ? x : (x && x.msg) || JSON.stringify(x))).join("; ");
+      }
+      if (d && typeof d === "object") return d.message || JSON.stringify(d);
+      if (typeof data?.message === "string" && data.message.trim()) return data.message;
+      if (typeof data?.error === "string" && data.error.trim()) return data.error;
+      if (res.status === 413) {
+        return "Upload too large for the proxy (Cloudflare ~100 MB per request). Use the chunked uploader.";
+      }
+      if (res.status === 502 || res.status === 504) {
+        return `Gateway error (HTTP ${res.status}) — proxy timeout or origin unreachable`;
+      }
+      const statusBit = res.status ? ` (HTTP ${res.status})` : "";
+      return `${fallback}${statusBit}`;
+    }
+
     async function api(path, options = {}) {
       const res = await fetch(path, { credentials: "same-origin", ...options });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const detail = data.detail || data.message || res.statusText;
-        throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+        throw new Error(formatApiError(data, res));
       }
       return data;
+    }
+
+    async function uploadFileChunked(item, opts) {
+      const init = await api("/api/upload/init", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: item.file.name,
+          size: item.file.size,
+          channel: opts.channel,
+          custom_chat_id: opts.custom_chat_id,
+          encrypt: opts.encrypt,
+          split: opts.split,
+          delete_on_done: opts.delete_on_done,
+        }),
+      });
+      const uploadId = init.upload_id;
+      const chunkSize = init.chunk_size || (8 * 1024 * 1024);
+      const total = item.file.size;
+      let offset = 0;
+      item.status = "running";
+      item.message = "Uploading to server…";
+      renderUploadList();
+
+      try {
+        while (offset < total) {
+          const end = Math.min(offset + chunkSize, total);
+          const blob = item.file.slice(offset, end);
+          const res = await fetch(`/api/upload/${uploadId}/chunk?offset=${offset}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: blob,
+            credentials: "same-origin",
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            throw new Error(formatApiError(data, res, "Chunk upload failed"));
+          }
+          offset = end;
+          const pct = total ? Math.min(99, (offset / total) * 100) : 0;
+          item.progress = pct;
+          item.message = `Uploading to server… ${formatBytes(offset)} / ${formatBytes(total)}`;
+          renderUploadList();
+          document.getElementById("up-status").textContent =
+            `Uploading ${item.file.name}: ${formatBytes(offset)} / ${formatBytes(total)}`;
+        }
+
+        const done = await api(`/api/upload/${uploadId}/complete`, { method: "POST" });
+        return done.job;
+      } catch (err) {
+        try {
+          await fetch(`/api/upload/${uploadId}`, { method: "DELETE", credentials: "same-origin" });
+        } catch (_) { /* ignore abort errors */ }
+        throw err;
+      }
     }
 
     function setLogBox(el, text, stickToBottom = true) {
@@ -982,35 +1055,53 @@
         document.getElementById("up-status").textContent = "Add at least one new file.";
         return;
       }
+      const btn = document.getElementById("btn-upload");
+      btn.disabled = true;
       document.getElementById("up-status").textContent = "Checking disk & uploading to server…";
       setLogBox(document.getElementById("up-log"), "", false);
-      const form = new FormData();
-      form.append("channel", selectedChannel("up-channel"));
-      form.append("custom_chat_id", document.getElementById("up-custom-id").value);
-      form.append("encrypt", document.getElementById("up-encrypt").checked);
-      form.append("split", document.getElementById("up-split").checked);
-      form.append("delete_on_done", document.getElementById("up-delete").checked);
-      pending.forEach((item) => form.append("files", item.file, item.file.name));
+      const opts = {
+        channel: selectedChannel("up-channel"),
+        custom_chat_id: document.getElementById("up-custom-id").value,
+        encrypt: document.getElementById("up-encrypt").checked,
+        split: document.getElementById("up-split").checked,
+        delete_on_done: document.getElementById("up-delete").checked,
+      };
 
       try {
-        const res = await fetch("/api/upload", { method: "POST", body: form, credentials: "same-origin" });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          throw new Error(data.detail || "Upload rejected");
-        }
-        (data.jobs || []).forEach((job, idx) => {
-          pending[idx].jobId = job.id;
-          pending[idx].status = job.status;
-          pending[idx].message = job.message;
+        // Chunked uploads (8 MiB) so multi-GB files work behind Cloudflare (~100 MiB limit).
+        for (let i = 0; i < pending.length; i++) {
+          const item = pending[i];
+          document.getElementById("up-status").textContent =
+            `Uploading file ${i + 1}/${pending.length}: ${item.file.name}`;
+          setLogBox(
+            document.getElementById("up-log"),
+            `Uploading ${item.file.name} (${formatBytes(item.file.size)}) in chunks…`,
+            false,
+          );
+          const job = await uploadFileChunked(item, opts);
+          item.jobId = job.id;
+          item.status = job.status;
+          item.message = job.message || "Queued";
+          item.progress = job.progress || 0;
           trackJob(job);
-        });
-        if (data.jobs && data.jobs[0]) activeUploadLogJobId = data.jobs[0].id;
-        renderUploadList();
+          if (i === 0) activeUploadLogJobId = job.id;
+          renderUploadList();
+        }
         document.getElementById("up-status").textContent = "Queued — processing one at a time.";
+        setLogBox(document.getElementById("up-log"), "Transfer complete. Waiting for Telegram job…", false);
         refreshConfig();
       } catch (err) {
         document.getElementById("up-status").textContent = err.message;
         setLogBox(document.getElementById("up-log"), err.message, false);
+        pending.forEach((item) => {
+          if (!item.jobId && item.status === "running") {
+            item.status = "error";
+            item.message = err.message;
+          }
+        });
+        renderUploadList();
+      } finally {
+        btn.disabled = false;
       }
     });
 
