@@ -17,11 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
+COPY tg-upload/requirements.txt /app/tg-upload-requirements.txt
 # tgcrypto needs a C compiler; remove build tools after install to keep image lean
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gcc \
       python3-dev \
     && pip install --no-cache-dir -r /app/requirements.txt \
+    && pip install --no-cache-dir -r /app/tg-upload-requirements.txt \
+    && python -c "import pyrogram; print('pyrogram', pyrogram.__version__)" \
     && apt-get purge -y --auto-remove gcc python3-dev \
     && rm -rf /var/lib/apt/lists/*
 

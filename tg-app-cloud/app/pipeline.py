@@ -1,6 +1,8 @@
 import os
 import queue
 import re
+import json
+import select
 import shutil
 import subprocess
 import sys
@@ -252,9 +254,441 @@ def parse_telegram_link(link):
 def get_pyrogram_client():
     try:
         import pyrogram
-    except Exception as exc:
-        raise RuntimeError("pyrogram is not installed") from exc
+    except ImportError as exc:
+        raise RuntimeError(f"pyrogram is not installed: {exc}") from exc
     return pyrogram.Client
+
+
+USER_SESSION_NAME = "user"
+_user_auth_lock = threading.Lock()
+_user_auth_state: dict = {
+    "phone": "",
+    "phone_code_hash": "",
+    "pending": False,
+}
+# Keep-alive login subprocess (same connected Client for send_code + sign_in).
+_login_proc: Optional[subprocess.Popen] = None
+
+
+def normalize_chat_id(chat_id):
+    text = str(chat_id).strip()
+    if not text:
+        raise ValueError("chat_id is empty")
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
+def chat_msg_to_link(chat_id, msg_id) -> str:
+    cid = str(chat_id).strip()
+    mid = int(msg_id)
+    if cid.startswith("-100") and cid[4:].isdigit():
+        return f"https://t.me/c/{cid[4:]}/{mid}"
+    if cid.lstrip("-").isdigit():
+        return f"https://t.me/c/{cid.lstrip('-')}/{mid}"
+    return f"https://t.me/{cid.lstrip('@')}/{mid}"
+
+
+def links_from_msg_ids(chat_id, msg_ids: list[int]) -> list[str]:
+    return [chat_msg_to_link(chat_id, mid) for mid in msg_ids]
+
+
+def user_session_paths() -> list[str]:
+    settings = get_settings()
+    return [
+        os.path.join(settings["tg_upload_dir"], f"{USER_SESSION_NAME}.session"),
+        os.path.join(settings["data_dir"], f"{USER_SESSION_NAME}.session"),
+    ]
+
+
+def user_session_present() -> bool:
+    return any(os.path.isfile(p) for p in user_session_paths())
+
+
+def _auth_lock_path() -> str:
+    """Marker so entrypoint won't copy user.session while login is in progress."""
+    return os.path.join(get_settings()["data_dir"], "user_auth.lock")
+
+
+def _set_auth_lock(active: bool) -> None:
+    path = _auth_lock_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if active:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+                f.write("\n")
+        except OSError as exc:
+            _log(f"WARN: could not write auth lock: {exc}")
+    else:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def _delete_user_session_files() -> None:
+    """Remove incomplete user sessions so send_code starts clean."""
+    settings = get_settings()
+    for folder in (settings["tg_upload_dir"], settings["data_dir"]):
+        for name in (f"{USER_SESSION_NAME}.session", f"{USER_SESSION_NAME}.session-journal"):
+            path = os.path.join(folder, name)
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError as exc:
+                _log(f"WARN: could not remove {path}: {exc}")
+
+
+def _persist_user_session() -> None:
+    settings = get_settings()
+    src_dir = settings["tg_upload_dir"]
+    data_dir = settings["data_dir"]
+    os.makedirs(data_dir, exist_ok=True)
+    for name in (f"{USER_SESSION_NAME}.session", f"{USER_SESSION_NAME}.session-journal"):
+        src = os.path.join(src_dir, name)
+        if os.path.isfile(src):
+            try:
+                shutil.copy2(src, os.path.join(data_dir, name))
+            except OSError as exc:
+                _log(f"WARN: could not persist {name}: {exc}")
+
+
+def _restore_user_session(*, only_if_missing: bool = True) -> None:
+    """Copy user.session from /data into tg-upload workdir."""
+    settings = get_settings()
+    src_dir = settings["data_dir"]
+    dest_dir = settings["tg_upload_dir"]
+    os.makedirs(dest_dir, exist_ok=True)
+    for name in (f"{USER_SESSION_NAME}.session", f"{USER_SESSION_NAME}.session-journal"):
+        src = os.path.join(src_dir, name)
+        dest = os.path.join(dest_dir, name)
+        if not os.path.isfile(src):
+            continue
+        if only_if_missing and os.path.isfile(dest):
+            continue
+        try:
+            shutil.copy2(src, dest)
+        except OSError as exc:
+            _log(f"WARN: could not restore {name}: {exc}")
+
+
+def _stop_login_proc() -> None:
+    global _login_proc
+    proc = _login_proc
+    _login_proc = None
+    if not proc:
+        return
+    try:
+        if proc.stdin:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3)
+    except Exception as exc:
+        _log(f"WARN: login process cleanup: {exc}")
+    _set_auth_lock(False)
+
+
+def _read_login_json(proc: subprocess.Popen, *, timeout: float) -> dict:
+    """Read one JSON line from the login subprocess stdout (with real timeout)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.stdout is None:
+            break
+        remaining = max(0.0, deadline - time.time())
+        ready, _, _ = select.select([proc.stdout], [], [], min(remaining, 1.0))
+        if not ready:
+            if proc.poll() is not None:
+                break
+            continue
+        line = proc.stdout.readline()
+        if not line:
+            if proc.poll() is not None:
+                break
+            continue
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            _log(f"WARN: login non-JSON line: {text[:200]}")
+            continue
+        if isinstance(payload, dict):
+            return payload
+
+    raise RuntimeError(f"Login process produced no response (exit={proc.poll()})")
+
+
+def user_auth_send_code(phone: str) -> dict:
+    """Step 1: start keep-alive login process and send the Telegram code."""
+    global _login_proc
+    phone = (phone or "").strip().replace(" ", "")
+    if not phone:
+        raise ValueError("Phone number is required (E.164, e.g. +60123456789)")
+    if not phone.startswith("+"):
+        raise ValueError("Phone must include country code, e.g. +60123456789")
+
+    settings = get_settings()
+    if not settings["api_id"] or not settings["api_hash"]:
+        raise RuntimeError("API_ID and API_HASH are required for user login")
+
+    with _user_auth_lock:
+        _stop_login_proc()
+        # Stale sessions + mid-copy races were causing false PhoneCodeExpired.
+        _delete_user_session_files()
+        _set_auth_lock(True)
+
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_auth_cli.py")
+        workdir = settings["tg_upload_dir"]
+        cmd = [
+            get_tg_upload_python(),
+            "-u",
+            script,
+            "login",
+            "--phone",
+            phone,
+            "--workdir",
+            workdir,
+            "--api-id",
+            str(settings["api_id"]),
+            "--api-hash",
+            settings["api_hash"],
+            "--session",
+            USER_SESSION_NAME,
+        ]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=workdir,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as exc:
+            _set_auth_lock(False)
+            raise RuntimeError(f"Failed to start login process: {exc}") from exc
+
+        _login_proc = proc
+        try:
+            payload = _read_login_json(proc, timeout=60)
+        except Exception:
+            _stop_login_proc()
+            raise
+
+        if not payload.get("ok"):
+            _stop_login_proc()
+            raise RuntimeError(payload.get("error") or "Failed to send login code")
+
+        phone_out = payload.get("phone") or phone
+        phone_code_hash = payload.get("phone_code_hash") or ""
+        if not phone_code_hash:
+            _stop_login_proc()
+            raise RuntimeError("Telegram did not return phone_code_hash")
+
+        _user_auth_state["phone"] = phone_out
+        _user_auth_state["phone_code_hash"] = phone_code_hash
+        _user_auth_state["pending"] = True
+        return {
+            "ok": True,
+            "phone": phone_out,
+            "pending": True,
+            "message": payload.get("message")
+            or "Login code sent — paste the newest code, then Confirm once (do not Send again)",
+        }
+
+
+def user_auth_confirm(code: str, password: str = "") -> dict:
+    """Step 2: send code/2FA to the keep-alive login process."""
+    global _login_proc
+    code = (code or "").strip().replace(" ", "")
+    # Telegram login codes are digits; strip dashes/odd paste chars.
+    code = "".join(ch for ch in code if ch.isdigit())
+    password = (password or "").strip()
+    if not code and not password:
+        raise ValueError("Enter the login code (and 2FA password if prompted)")
+
+    with _user_auth_lock:
+        proc = _login_proc
+        if not proc or proc.poll() is not None:
+            _login_proc = None
+            _user_auth_state["pending"] = False
+            _set_auth_lock(False)
+            raise RuntimeError("No active login — click Send code once, then Confirm")
+
+        if not proc.stdin:
+            _stop_login_proc()
+            raise RuntimeError("Login process stdin closed — send a new code")
+
+        try:
+            proc.stdin.write(json.dumps({"code": code, "password": password}) + "\n")
+            proc.stdin.flush()
+        except Exception as exc:
+            _stop_login_proc()
+            raise RuntimeError(f"Failed to send confirm to login process: {exc}") from exc
+
+        try:
+            payload = _read_login_json(proc, timeout=60)
+        except Exception:
+            _stop_login_proc()
+            raise
+
+        if payload.get("need_2fa"):
+            return {
+                "ok": False,
+                "need_2fa": True,
+                "pending": True,
+                "message": payload.get("message")
+                or "Two-step verification enabled — enter your cloud password",
+            }
+
+        if payload.get("pending") and not payload.get("ok"):
+            # Invalid code — process still waiting for another attempt.
+            raise RuntimeError(payload.get("error") or "Login failed")
+
+        # Process should exit after success or hard failure.
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+        _login_proc = None
+        _set_auth_lock(False)
+
+        if not payload.get("ok"):
+            _user_auth_state["pending"] = False
+            _user_auth_state["phone_code_hash"] = ""
+            raise RuntimeError(payload.get("error") or "Failed to confirm login")
+
+        _user_auth_state["pending"] = False
+        _user_auth_state["phone_code_hash"] = ""
+        _persist_user_session()
+        return {
+            "ok": True,
+            "pending": False,
+            "user_authorized": True,
+            "user": payload.get("user") or "",
+            "message": payload.get("message") or "User authorized",
+        }
+
+
+def user_auth_status() -> dict:
+    settings = get_settings()
+    return {
+        "user_authorized": user_session_present(),
+        "pending": bool(_user_auth_state.get("pending")),
+        "phone_hint": _user_auth_state.get("phone") or settings.get("user_phone") or "",
+        "default_phone": settings.get("user_phone") or "",
+    }
+
+
+def list_channel_media(
+    chat_id,
+    query: str = "",
+    offset: int = 0,
+    limit: int = 30,
+) -> dict:
+    """List/search channel media with the user session (supports messages.Search)."""
+    if limit < 1:
+        limit = 1
+    if limit > 50:
+        limit = 50
+    if offset < 0:
+        offset = 0
+
+    settings = get_settings()
+    if not settings["api_id"] or not settings["api_hash"]:
+        raise RuntimeError("API_ID and API_HASH are required")
+    # Prefer the persisted authorized session from /data (survives rebuilds).
+    _restore_user_session(only_if_missing=False)
+    if not user_session_present():
+        raise RuntimeError(
+            "NEED_USER_AUTH: Authorize a Telegram user account first (Browse needs a human session)."
+        )
+
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browse_channel.py")
+    workdir = settings["tg_upload_dir"]
+    resolved = normalize_chat_id(chat_id)
+
+    cmd = [
+        get_tg_upload_python(),
+        "-u",
+        script,
+        "--chat-id",
+        str(resolved),
+        "--query",
+        query or "",
+        "--offset",
+        str(offset),
+        "--limit",
+        str(limit),
+        "--workdir",
+        workdir,
+        "--api-id",
+        str(settings["api_id"]),
+        "--api-hash",
+        settings["api_hash"],
+        "--session",
+        USER_SESSION_NAME,
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=40,
+            cwd=workdir,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Channel browse timed out talking to Telegram") from exc
+
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    if not stdout:
+        detail = stderr[-500:] if stderr else f"exit {proc.returncode}"
+        raise RuntimeError(f"Browse produced no output: {detail}")
+
+    payload = None
+    for line in reversed(stdout.splitlines()):
+        text = line.strip()
+        if not text.startswith("{"):
+            continue
+        try:
+            payload = json.loads(text)
+            break
+        except json.JSONDecodeError:
+            continue
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Browse returned invalid JSON: {stdout[-300:]}")
+
+    if not payload.get("ok"):
+        err = payload.get("error") or "Browse failed"
+        if payload.get("need_user_auth"):
+            raise RuntimeError(f"NEED_USER_AUTH: {err}")
+        raise RuntimeError(err)
+
+    return {
+        "items": payload.get("items") or [],
+        "mode": payload.get("mode") or ("search" if query else "history"),
+        "query": query or "",
+        "offset": offset,
+        "next_offset": int(payload.get("next_offset") or offset),
+        "has_more": bool(payload.get("has_more")),
+        "chat_id": str(payload.get("chat_id") or resolved),
+    }
 
 
 def get_caption_from_link(link):

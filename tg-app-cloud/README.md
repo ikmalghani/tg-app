@@ -61,6 +61,20 @@ After mounting correctly you should see in Files:
 
 Authorize once and save crypt.conf once; both persist across image updates as long as `/data` stays mounted.
 
+## Browse Channel (user account)
+
+Browse/search uses a **Telegram user session** (not the bot), because bots cannot call `messages.Search`.
+
+1. Set env (optional default phone):
+   - `API_ID` / `API_HASH` (already required)
+   - `USER_PHONE=+60…` (optional; you can type the phone in the UI)
+2. Deploy and open the app.
+3. **Authorize Bot** (existing) for upload/download.
+4. **Authorize User** → enter phone → Send code → enter code from Telegram (+ 2FA if enabled).
+5. **Browse Channel** → search captions / multi-select → Download selected.
+
+The user account must already be a member of the channel. Session is stored as `user.session` on `/data`.
+
 ## Disk guard
 
 Before accepting uploads (and again before each queued job runs), the API estimates staging space:

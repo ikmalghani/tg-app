@@ -40,8 +40,10 @@ def estimate_upload_bytes(file_size: int, encrypt: bool, split: bool) -> int:
     return needed
 
 
-def estimate_download_bytes(link_count: int) -> int:
-    """Unknown remote sizes — require reserve + a soft per-link cushion."""
+def estimate_download_bytes(link_count: int, known_bytes: int = 0) -> int:
+    """Disk estimate for downloads; use known sizes when browsing selection."""
+    if known_bytes and known_bytes > 0:
+        return int(known_bytes * 2.1) + 64 * 1024 * 1024
     cushion = max(link_count, 1) * 512 * 1024 * 1024  # 512 MiB per link soft estimate
     return cushion
 

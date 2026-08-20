@@ -94,6 +94,8 @@ def get_settings():
         "api_id": os.getenv("API_ID", "").strip(),
         "api_hash": os.getenv("API_HASH", "").strip(),
         "bot_token": os.getenv("BOT_TOKEN", "").strip(),
+        # Optional default phone for Browse Channel user login (E.164, e.g. +60123456789)
+        "user_phone": os.getenv("USER_PHONE", "").strip(),
         "disk_reserve_bytes": disk_reserve,
         "channels": _load_channels(),
         "channel_map": {c["name"]: c["id"] for c in _load_channels()},

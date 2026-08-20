@@ -256,6 +256,41 @@
     .explorer-actions { display: flex; gap: 6px; flex-shrink: 0; }
     .explorer-actions button.danger { color: var(--err); }
     .explorer-empty { padding: 24px 8px; text-align: center; color: var(--muted); font-size: 0.9rem; }
+    .channel-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: start;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      padding: 10px 12px;
+      cursor: pointer;
+    }
+    .channel-row:hover { background: #f3f8fb; }
+    .channel-row.selected { border-color: #5a91b3; background: #eef5fa; }
+    .channel-row input[type="checkbox"] { margin-top: 3px; }
+    .channel-caption { font-size: 0.9rem; font-weight: 600; word-break: break-word; }
+    .channel-meta { font-size: 0.75rem; color: var(--muted); margin-top: 3px; }
+    .channel-footer {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+    }
+    .channel-selected-count { font-size: 0.82rem; color: var(--muted); }
+    .user-auth-box {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+    }
+    .user-auth-box[hidden] { display: none; }
     .field-with-clear {
       display: grid;
       grid-template-columns: 1fr auto;
@@ -275,6 +310,7 @@
       .top { flex-direction: column; }
       .disk { text-align: left; }
       .explorer-row { grid-template-columns: 1fr; }
+      .channel-row { grid-template-columns: auto 1fr; }
       .field-with-clear { grid-template-columns: 1fr; }
     }
   </style>
@@ -291,11 +327,34 @@
 
     <section class="panel">
       <h2 class="panel-title">Authorize</h2>
+      <p class="hint" style="margin-top:0">Bot session = upload/download. User session = Browse Channel search.</p>
       <div class="actions">
-        <button type="button" class="primary" id="btn-authorize">Authorize</button>
+        <button type="button" class="primary" id="btn-authorize">Authorize Bot</button>
         <button type="button" id="btn-auth-log" hidden>View log</button>
+        <button type="button" id="btn-user-auth">Authorize User</button>
       </div>
       <p class="status-bar" id="auth-status"></p>
+      <p class="status-bar" id="user-auth-status"></p>
+      <div class="user-auth-box" id="user-auth-box" hidden>
+        <div class="row">
+          <label class="field-label" for="user-phone">Phone:</label>
+          <input type="text" id="user-phone" placeholder="+60123456789" autocomplete="tel" />
+        </div>
+        <div class="actions" style="justify-content:flex-start">
+          <button type="button" id="btn-user-send-code">Send code</button>
+        </div>
+        <div class="row">
+          <label class="field-label" for="user-code">Code:</label>
+          <input type="text" id="user-code" placeholder="Login code from Telegram" autocomplete="one-time-code" />
+        </div>
+        <div class="row">
+          <label class="field-label" for="user-2fa">2FA password:</label>
+          <input type="password" id="user-2fa" placeholder="Only if cloud password is enabled" autocomplete="current-password" />
+        </div>
+        <div class="actions" style="justify-content:flex-start">
+          <button type="button" class="primary" id="btn-user-confirm">Confirm login</button>
+        </div>
+      </div>
     </section>
 
     <section class="panel">
@@ -357,6 +416,7 @@
         <span id="dl-queue-text">Queue idle</span>
       </div>
       <div class="actions">
+        <button type="button" id="btn-browse-channel">Browse Channel</button>
         <button type="button" id="btn-browse-downloads">Browse File Explorer</button>
         <button type="button" id="btn-download">Download</button>
       </div>
@@ -452,6 +512,33 @@
     </div>
   </div>
 
+  <div class="modal-backdrop" id="channel-modal" hidden>
+    <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="channel-modal-title">
+      <div class="modal-head">
+        <h3 id="channel-modal-title">Browse channel</h3>
+        <button type="button" id="btn-channel-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <p class="explorer-disk" id="channel-disk">Uses your Telegram user session (caption search)</p>
+        <div class="explorer-toolbar">
+          <input type="search" id="channel-search" placeholder="Search caption…" autocomplete="off" />
+          <button type="button" id="btn-channel-search">Search</button>
+          <button type="button" id="btn-channel-refresh">Newest</button>
+        </div>
+        <div class="explorer-list" id="channel-list"></div>
+        <div class="channel-footer">
+          <span class="channel-selected-count" id="channel-selected-count">0 selected</span>
+          <div class="actions" style="margin:0">
+            <button type="button" id="btn-channel-load-more" hidden>Load more</button>
+            <button type="button" id="btn-channel-clear-sel">Clear selection</button>
+            <button type="button" id="btn-channel-download">Download selected</button>
+          </div>
+        </div>
+        <p class="status-bar" id="channel-status"></p>
+      </div>
+    </div>
+  </div>
+
 
   <script>
     let CHANNELS = [];
@@ -466,6 +553,15 @@
     let dlBannerTimer = null;
     let dlBannerJobId = null;
     let explorerFiles = [];
+    let userAuthorized = false;
+    /** @type {Array<{msg_id:number,caption:string,name:string,size:number,size_human:string,date:number,link:string}>} */
+    let channelItems = [];
+    /** @type {Map<number, {msg_id:number,caption:string,name:string,size:number,size_human:string}>} */
+    let channelSelected = new Map();
+    let channelNextOffset = 0;
+    let channelHasMore = false;
+    let channelQuery = "";
+    let channelLoading = false;
 
     function escapeHtml(s) {
       return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
@@ -843,6 +939,186 @@
       document.getElementById("explorer-modal").hidden = true;
     }
 
+    function formatChannelDate(ts) {
+      if (!ts) return "";
+      try { return new Date(ts * 1000).toLocaleString(); }
+      catch (_) { return ""; }
+    }
+
+    function updateChannelSelectedCount() {
+      const n = channelSelected.size;
+      const bytes = [...channelSelected.values()].reduce((s, x) => s + (x.size || 0), 0);
+      document.getElementById("channel-selected-count").textContent =
+        n ? `${n} selected · ${formatBytes(bytes)}` : "0 selected";
+    }
+
+    function renderChannelList() {
+      const list = document.getElementById("channel-list");
+      if (!channelItems.length) {
+        list.innerHTML = `<div class="explorer-empty">${
+          channelLoading ? "Loading…" : "No media found."
+        }</div>`;
+        return;
+      }
+      list.innerHTML = channelItems.map((item) => {
+        const checked = channelSelected.has(item.msg_id) ? "checked" : "";
+        const selected = checked ? " selected" : "";
+        const caption = escapeHtml(item.caption || item.name || `message_${item.msg_id}`);
+        const meta = [
+          item.size_human || formatBytes(item.size || 0),
+          formatChannelDate(item.date),
+          `#${item.msg_id}`,
+        ].filter(Boolean).join(" · ");
+        return `<label class="channel-row${selected}" data-msg-id="${item.msg_id}">
+          <input type="checkbox" ${checked} data-msg-id="${item.msg_id}" />
+          <span>
+            <span class="channel-caption">${caption}</span>
+            <div class="channel-meta">${escapeHtml(meta)}</div>
+          </span>
+          <span class="channel-meta">${escapeHtml(item.size_human || formatBytes(item.size || 0))}</span>
+        </label>`;
+      }).join("");
+    }
+
+    async function fetchChannelMedia({ reset = false } = {}) {
+      if (channelLoading) return;
+      channelLoading = true;
+      const status = document.getElementById("channel-status");
+      const loadMoreBtn = document.getElementById("btn-channel-load-more");
+      status.textContent = reset ? "Loading channel…" : "Loading more…";
+      loadMoreBtn.hidden = true;
+      if (reset) {
+        channelItems = [];
+        channelNextOffset = 0;
+        channelHasMore = false;
+        renderChannelList();
+      }
+      try {
+        const started = await api("/api/channel/media", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            channel: selectedChannel("dl-channel"),
+            custom_chat_id: document.getElementById("dl-custom-id").value,
+            query: channelQuery,
+            offset: reset ? 0 : channelNextOffset,
+            limit: 30,
+          }),
+        });
+        const taskId = started.task_id;
+        if (!taskId) throw new Error("Browse task did not start");
+
+        let data = started;
+        const deadline = Date.now() + 90000;
+        while (data.status === "running") {
+          if (Date.now() > deadline) throw new Error("Browse is taking too long — try again");
+          status.textContent = "Talking to Telegram…";
+          await new Promise((r) => setTimeout(r, 1000));
+          data = await api(`/api/channel/media/${encodeURIComponent(taskId)}`);
+        }
+        if (data.status === "error") {
+          const err = new Error(data.error || "Browse failed");
+          err.needUserAuth = !!data.need_user_auth;
+          throw err;
+        }
+
+        const items = data.items || [];
+        if (reset) channelItems = items;
+        else {
+          const seen = new Set(channelItems.map((x) => x.msg_id));
+          for (const item of items) {
+            if (!seen.has(item.msg_id)) channelItems.push(item);
+          }
+        }
+        channelNextOffset = data.next_offset || 0;
+        channelHasMore = !!data.has_more;
+        loadMoreBtn.hidden = !channelHasMore;
+        const modeLabel = data.mode === "search" ? `Search “${channelQuery}”` : "Newest documents";
+        status.textContent = `${modeLabel} · showing ${channelItems.length}` +
+          (channelHasMore ? " · more available" : "");
+        document.getElementById("channel-modal-title").textContent =
+          `Browse channel · ${selectedChannel("dl-channel")}`;
+        renderChannelList();
+        updateChannelSelectedCount();
+      } catch (err) {
+        status.textContent = err.message || "Failed to load channel";
+        if (reset) {
+          let hint = `<div class="explorer-empty">${escapeHtml(err.message)}</div>`;
+          if (err.needUserAuth) {
+            hint = `<div class="explorer-empty">${escapeHtml(err.message)}<br/><br/>Close this and use <strong>Authorize User</strong> first.</div>`;
+          }
+          document.getElementById("channel-list").innerHTML = hint;
+        }
+      } finally {
+        channelLoading = false;
+      }
+    }
+
+    function openChannelModal() {
+      document.getElementById("channel-modal").hidden = false;
+      document.getElementById("channel-search").value = channelQuery;
+      if (!userAuthorized) {
+        document.getElementById("channel-list").innerHTML =
+          `<div class="explorer-empty">Authorize a Telegram <strong>user</strong> account first (Authorize User), then open Browse Channel again.</div>`;
+        document.getElementById("channel-status").textContent = "User session required";
+        return;
+      }
+      fetchChannelMedia({ reset: true });
+    }
+
+    function closeChannelModal() {
+      document.getElementById("channel-modal").hidden = true;
+    }
+
+    async function downloadChannelSelection() {
+      if (!channelSelected.size) {
+        document.getElementById("channel-status").textContent = "Select at least one file";
+        return;
+      }
+      const msgIds = [...channelSelected.keys()];
+      const knownBytes = [...channelSelected.values()].reduce((s, x) => s + (x.size || 0), 0);
+      const status = document.getElementById("channel-status");
+      status.textContent = `Queuing ${msgIds.length} file(s)…`;
+      try {
+        const data = await api("/api/download", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            msg_ids: msgIds,
+            known_bytes: knownBytes,
+            channel: selectedChannel("dl-channel"),
+            custom_chat_id: document.getElementById("dl-custom-id").value,
+            combine: document.getElementById("dl-combine").checked,
+            decrypt: document.getElementById("dl-decrypt").checked,
+          }),
+        });
+        closeChannelModal();
+        document.getElementById("dl-status").textContent = "Downloading…";
+        setLogBox(document.getElementById("dl-log"), "", false);
+        if (dlBannerTimer && dlBannerTimer !== "done") clearTimeout(dlBannerTimer);
+        dlBannerTimer = null;
+        dlBannerJobId = null;
+        trackJob(data.job);
+      } catch (err) {
+        status.textContent = err.message;
+      }
+    }
+
+    function renderUserAuthStatus(ua) {
+      userAuthorized = !!(ua && ua.user_authorized);
+      const el = document.getElementById("user-auth-status");
+      if (userAuthorized) {
+        el.textContent = "User session present (Browse Channel ready).";
+      } else if (ua && ua.pending) {
+        el.textContent = "User login pending — enter the code from Telegram.";
+      } else {
+        el.textContent = "User session missing — needed for Browse Channel.";
+      }
+      if (ua && ua.default_phone && !document.getElementById("user-phone").value) {
+        document.getElementById("user-phone").value = ua.default_phone;
+      }
+    }
+
     async function openExplorerModal() {
       document.getElementById("explorer-modal").hidden = false;
       document.getElementById("explorer-list").innerHTML = `<div class="explorer-empty">Loading…</div>`;
@@ -876,8 +1152,11 @@
       document.getElementById("disk-info").innerHTML =
         `Free <strong>${escapeHtml(d.free_human)}</strong><br/>reserve ${escapeHtml(d.reserve_human)}`;
       if (data.authorized) {
-        document.getElementById("auth-status").textContent = "Session present (authorized).";
+        document.getElementById("auth-status").textContent = "Bot session present (authorized).";
+      } else {
+        document.getElementById("auth-status").textContent = "Bot session missing — click Authorize Bot.";
       }
+      renderUserAuthStatus(data.user_auth || {});
       renderCryptStatus(data.crypt);
     }
 
@@ -957,7 +1236,7 @@
     });
 
     document.getElementById("btn-authorize").addEventListener("click", async () => {
-      document.getElementById("auth-status").textContent = "Authorizing…";
+      document.getElementById("auth-status").textContent = "Authorizing bot…";
       document.getElementById("auth-modal-cmd").textContent = "Waiting for command…";
       document.getElementById("auth-modal-log").textContent = "";
       openAuthModal();
@@ -967,6 +1246,63 @@
       } catch (err) {
         document.getElementById("auth-status").textContent = err.message;
         document.getElementById("auth-modal-log").textContent = err.message;
+      }
+    });
+
+    document.getElementById("btn-user-auth").addEventListener("click", () => {
+      const box = document.getElementById("user-auth-box");
+      box.hidden = !box.hidden;
+    });
+    document.getElementById("btn-user-send-code").addEventListener("click", async () => {
+      const phone = document.getElementById("user-phone").value;
+      const btn = document.getElementById("btn-user-send-code");
+      btn.disabled = true;
+      document.getElementById("user-auth-status").textContent = "Sending code…";
+      document.getElementById("user-code").value = "";
+      try {
+        const data = await api("/api/user/auth/send-code", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ phone }),
+        });
+        document.getElementById("user-auth-status").textContent =
+          (data.message || "Code sent.") +
+          " Use only the newest Telegram login message. Confirm within a few minutes — do not click Send again.";
+        document.getElementById("user-auth-box").hidden = false;
+        document.getElementById("user-code").focus();
+      } catch (err) {
+        document.getElementById("user-auth-status").textContent = err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    document.getElementById("btn-user-confirm").addEventListener("click", async () => {
+      const btn = document.getElementById("btn-user-confirm");
+      btn.disabled = true;
+      document.getElementById("user-auth-status").textContent = "Confirming…";
+      try {
+        const data = await api("/api/user/auth/confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            code: document.getElementById("user-code").value,
+            password: document.getElementById("user-2fa").value,
+          }),
+        });
+        if (data.need_2fa) {
+          document.getElementById("user-auth-status").textContent = data.message || "Enter 2FA password";
+          return;
+        }
+        document.getElementById("user-auth-status").textContent = data.message || "User authorized.";
+        document.getElementById("user-code").value = "";
+        document.getElementById("user-2fa").value = "";
+        userAuthorized = true;
+        document.getElementById("user-auth-box").hidden = true;
+        refreshConfig().catch(() => {});
+      } catch (err) {
+        document.getElementById("user-auth-status").textContent = err.message;
+      } finally {
+        btn.disabled = false;
       }
     });
 
@@ -980,7 +1316,50 @@
       if (e.target.id === "explorer-modal") closeExplorerModal();
     });
     document.getElementById("btn-browse-downloads").addEventListener("click", openExplorerModal);
-    
+    document.getElementById("btn-browse-channel").addEventListener("click", openChannelModal);
+    document.getElementById("btn-channel-close").addEventListener("click", closeChannelModal);
+    document.getElementById("channel-modal").addEventListener("click", (e) => {
+      if (e.target.id === "channel-modal") closeChannelModal();
+    });
+    document.getElementById("btn-channel-refresh").addEventListener("click", () => {
+      channelQuery = "";
+      document.getElementById("channel-search").value = "";
+      fetchChannelMedia({ reset: true });
+    });
+    document.getElementById("btn-channel-search").addEventListener("click", () => {
+      channelQuery = (document.getElementById("channel-search").value || "").trim();
+      fetchChannelMedia({ reset: true });
+    });
+    document.getElementById("channel-search").addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      channelQuery = (document.getElementById("channel-search").value || "").trim();
+      fetchChannelMedia({ reset: true });
+    });
+    document.getElementById("btn-channel-load-more").addEventListener("click", () => {
+      fetchChannelMedia({ reset: false });
+    });
+    document.getElementById("btn-channel-clear-sel").addEventListener("click", () => {
+      channelSelected.clear();
+      renderChannelList();
+      updateChannelSelectedCount();
+    });
+    document.getElementById("btn-channel-download").addEventListener("click", () => {
+      downloadChannelSelection();
+    });
+    document.getElementById("channel-list").addEventListener("change", (e) => {
+      const input = e.target.closest('input[type="checkbox"][data-msg-id]');
+      if (!input) return;
+      const msgId = Number(input.getAttribute("data-msg-id"));
+      const item = channelItems.find((x) => x.msg_id === msgId);
+      if (!item) return;
+      if (input.checked) channelSelected.set(msgId, item);
+      else channelSelected.delete(msgId);
+      const row = input.closest(".channel-row");
+      if (row) row.classList.toggle("selected", input.checked);
+      updateChannelSelectedCount();
+    });
+
     document.getElementById("btn-explorer-refresh").addEventListener("click", () => {
       loadExplorerFiles().catch((err) => {
         document.getElementById("explorer-list").innerHTML =
@@ -1021,6 +1400,7 @@
       if (e.key !== "Escape") return;
       closeAuthModal();
       closeExplorerModal();
+      closeChannelModal();
     });
 
     document.getElementById("btn-download").addEventListener("click", async () => {

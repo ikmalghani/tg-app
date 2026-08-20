@@ -17,14 +17,29 @@ persist_session() {
   if [ -f "$TG_UPLOAD_DIR/profile.session-journal" ]; then
     cp -f "$TG_UPLOAD_DIR/profile.session-journal" "$DATA_DIR/profile.session-journal"
   fi
+  # Skip user.session while login is in progress (avoids tearing the SQLite session).
+  if [ ! -f "$DATA_DIR/user_auth.lock" ]; then
+    if [ -f "$TG_UPLOAD_DIR/user.session" ]; then
+      cp -f "$TG_UPLOAD_DIR/user.session" "$DATA_DIR/user.session"
+    fi
+    if [ -f "$TG_UPLOAD_DIR/user.session-journal" ]; then
+      cp -f "$TG_UPLOAD_DIR/user.session-journal" "$DATA_DIR/user.session-journal"
+    fi
+  fi
 }
 
-# Restore Telegram session from the data volume (survives image rebuilds)
+# Restore Telegram sessions from the data volume (survives image rebuilds)
 if [ -f "$DATA_DIR/profile.session" ]; then
   cp -f "$DATA_DIR/profile.session" "$TG_UPLOAD_DIR/profile.session"
 fi
 if [ -f "$DATA_DIR/profile.session-journal" ]; then
   cp -f "$DATA_DIR/profile.session-journal" "$TG_UPLOAD_DIR/profile.session-journal"
+fi
+if [ -f "$DATA_DIR/user.session" ]; then
+  cp -f "$DATA_DIR/user.session" "$TG_UPLOAD_DIR/user.session"
+fi
+if [ -f "$DATA_DIR/user.session-journal" ]; then
+  cp -f "$DATA_DIR/user.session-journal" "$TG_UPLOAD_DIR/user.session-journal"
 fi
 
 # NAS bind mounts are often root-owned; app runs as uid 1000

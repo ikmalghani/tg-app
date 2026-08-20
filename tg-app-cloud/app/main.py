@@ -4,6 +4,7 @@ import shutil
 import threading
 import time
 import uuid
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -28,6 +29,87 @@ UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 _upload_sessions: dict[str, dict] = {}
 _upload_sessions_lock = threading.Lock()
 _UPLOAD_SESSION_TTL_SEC = 6 * 60 * 60
+
+# Channel browse (user session) — short HTTP start/poll to stay under Cloudflare timeouts.
+_browse_tasks: dict[str, dict] = {}
+_browse_tasks_lock = threading.Lock()
+_BROWSE_TASK_TTL_SEC = 15 * 60
+
+
+def _purge_browse_tasks() -> None:
+    now = time.time()
+    with _browse_tasks_lock:
+        stale = [
+            tid
+            for tid, task in _browse_tasks.items()
+            if now - task.get("updated_at", task.get("created_at", 0)) > _BROWSE_TASK_TTL_SEC
+        ]
+        for tid in stale:
+            _browse_tasks.pop(tid, None)
+
+
+def _browse_task_dict(task: dict) -> dict:
+    out = {
+        "task_id": task["id"],
+        "status": task["status"],
+        "error": task.get("error") or "",
+        "need_user_auth": bool(task.get("need_user_auth")),
+        "created_at": task.get("created_at"),
+        "updated_at": task.get("updated_at"),
+    }
+    if task["status"] == "done" and task.get("result"):
+        out.update(task["result"])
+        out["ok"] = True
+    return out
+
+
+def _start_browse_task(chat_id: str, query: str, offset: int, limit: int) -> dict:
+    _purge_browse_tasks()
+    task_id = uuid.uuid4().hex[:12]
+    now = time.time()
+    task = {
+        "id": task_id,
+        "status": "running",
+        "error": "",
+        "need_user_auth": False,
+        "result": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    with _browse_tasks_lock:
+        _browse_tasks[task_id] = task
+
+    def _worker():
+        try:
+            result = pipeline.list_channel_media(
+                chat_id=chat_id,
+                query=query,
+                offset=offset,
+                limit=limit,
+            )
+            for item in result.get("items", []):
+                item["size_human"] = format_bytes(int(item.get("size") or 0))
+            with _browse_tasks_lock:
+                current = _browse_tasks.get(task_id)
+                if not current:
+                    return
+                current["status"] = "done"
+                current["result"] = result
+                current["updated_at"] = time.time()
+        except Exception as exc:
+            err = str(exc)
+            need = err.startswith("NEED_USER_AUTH:") or "need_user_auth" in err.lower()
+            with _browse_tasks_lock:
+                current = _browse_tasks.get(task_id)
+                if not current:
+                    return
+                current["status"] = "error"
+                current["error"] = err.replace("NEED_USER_AUTH: ", "", 1)
+                current["need_user_auth"] = need
+                current["updated_at"] = time.time()
+
+    threading.Thread(target=_worker, name=f"browse-{task_id}", daemon=True).start()
+    return task
 
 
 def _redact_command(command: str) -> str:
@@ -147,7 +229,12 @@ def _persist_session_to_data() -> None:
     src_dir = settings["tg_upload_dir"]
     data_dir = settings["data_dir"]
     os.makedirs(data_dir, exist_ok=True)
-    for name in ("profile.session", "profile.session-journal"):
+    for name in (
+        "profile.session",
+        "profile.session-journal",
+        "user.session",
+        "user.session-journal",
+    ):
         src = os.path.join(src_dir, name)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(data_dir, name))
@@ -244,7 +331,7 @@ def _register_handlers():
         combine = job.payload.get("combine", True)
         decrypt = job.payload.get("decrypt", True)
 
-        required = estimate_download_bytes(len(links))
+        required = estimate_download_bytes(len(links), known_bytes=int(job.file_size or 0))
         check = check_free_space(settings["data_dir"], required, settings["disk_reserve_bytes"])
         if not check.ok:
             raise RuntimeError(check.message)
@@ -309,6 +396,7 @@ def api_config():
     return {
         "channels": settings["channels"],
         "authorized": _session_present(),
+        "user_auth": pipeline.user_auth_status(),
         "crypt": _crypt_status(),
         "disk": {
             "total": total,
@@ -606,6 +694,70 @@ async def api_upload_abort(upload_id: str):
     return {"ok": True}
 
 
+@app.post("/api/user/auth/send-code")
+async def api_user_auth_send_code(request: Request):
+    body = await request.json()
+    phone = str(body.get("phone") or get_settings().get("user_phone") or "").strip()
+    try:
+        # Pyrogram sync client must not run on FastAPI's event-loop thread.
+        return await asyncio.to_thread(pipeline.user_auth_send_code, phone)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Send code failed: {exc}") from exc
+
+
+@app.post("/api/user/auth/confirm")
+async def api_user_auth_confirm(request: Request):
+    body = await request.json()
+    code = str(body.get("code") or "").strip()
+    password = str(body.get("password") or "").strip()
+    try:
+        result = await asyncio.to_thread(pipeline.user_auth_confirm, code, password)
+        _persist_session_to_data()
+        return result
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Confirm login failed: {exc}") from exc
+
+
+@app.get("/api/user/auth/status")
+def api_user_auth_status():
+    return {"ok": True, **pipeline.user_auth_status()}
+
+
+@app.post("/api/channel/media")
+async def api_channel_media(request: Request):
+    """Start user-session channel browse/search; poll GET .../media/{task_id}."""
+    body = await request.json()
+    channel = body.get("channel", "Custom Channel")
+    custom_chat_id = body.get("custom_chat_id", "")
+    chat_id = _resolve_chat_id(channel, custom_chat_id)
+    query = str(body.get("query") or "").strip()
+    try:
+        offset = int(body.get("offset") or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid offset") from exc
+    try:
+        limit = int(body.get("limit") or 30)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid limit") from exc
+
+    task = _start_browse_task(chat_id, query, offset, limit)
+    return {"ok": True, **_browse_task_dict(task)}
+
+
+@app.get("/api/channel/media/{task_id}")
+def api_channel_media_status(task_id: str):
+    _purge_browse_tasks()
+    with _browse_tasks_lock:
+        task = _browse_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Browse task not found or expired")
+    return _browse_task_dict(task)
+
+
 @app.post("/api/download")
 async def api_download(request: Request):
     settings = get_settings()
@@ -615,16 +767,38 @@ async def api_download(request: Request):
         links = [str(x).strip() for x in links_raw if str(x).strip()]
     else:
         links = [line.strip() for line in str(links_raw).splitlines() if line.strip()]
-    if not links:
-        raise HTTPException(status_code=400, detail="Enter at least one Telegram link")
 
     channel = body.get("channel", "Custom Channel")
     custom_chat_id = body.get("custom_chat_id", "")
     chat_id = _resolve_chat_id(channel, custom_chat_id)
+
+    msg_ids_raw = body.get("msg_ids") or []
+    if msg_ids_raw and not links:
+        msg_ids = []
+        for raw in msg_ids_raw:
+            try:
+                msg_ids.append(int(raw))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid msg_id: {raw}") from exc
+        if not msg_ids:
+            raise HTTPException(status_code=400, detail="Select at least one file")
+        links = pipeline.links_from_msg_ids(chat_id, msg_ids)
+
+    if not links:
+        raise HTTPException(
+            status_code=400,
+            detail="Enter Telegram links or select files from Browse Channel",
+        )
+
     combine = bool(body.get("combine", True))
     decrypt = bool(body.get("decrypt", True))
 
-    required = estimate_download_bytes(len(links))
+    try:
+        known_bytes = int(body.get("known_bytes") or 0)
+    except (TypeError, ValueError):
+        known_bytes = 0
+
+    required = estimate_download_bytes(len(links), known_bytes=known_bytes)
     check = check_free_space(settings["data_dir"], required, settings["disk_reserve_bytes"])
     if not check.ok:
         raise HTTPException(status_code=507, detail=check.message)
@@ -637,8 +811,8 @@ async def api_download(request: Request):
             "combine": combine,
             "decrypt": decrypt,
         },
-        file_name=f"{len(links)} link(s)",
-        file_size=0,
+        file_name=f"{len(links)} file(s)",
+        file_size=known_bytes,
     )
 
     return {
