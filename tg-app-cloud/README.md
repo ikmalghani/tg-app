@@ -61,6 +61,16 @@ After mounting correctly you should see in Files:
 
 Authorize once and save crypt.conf once; both persist across image updates as long as `/data` stays mounted.
 
+## Download from channel browser
+
+On the Download panel, **Browse Channel** lists media live from Telegram (no local index):
+
+- Shows **caption** (preferred name) and **file size**
+- Caption **search** uses Telegram’s own search
+- Multi-select files → **Download selected** (same combine/decrypt queue as link downloads)
+
+The bot must be an **admin** (or otherwise able to read history) in that channel. Paste TG links still works as a fallback.
+
 ## Disk guard
 
 Before accepting uploads (and again before each queued job runs), the API estimates staging space:

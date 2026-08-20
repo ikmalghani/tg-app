@@ -256,6 +256,37 @@
     .explorer-actions { display: flex; gap: 6px; flex-shrink: 0; }
     .explorer-actions button.danger { color: var(--err); }
     .explorer-empty { padding: 24px 8px; text-align: center; color: var(--muted); font-size: 0.9rem; }
+    .channel-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: start;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      padding: 10px 12px;
+      cursor: pointer;
+    }
+    .channel-row:hover { background: #f3f8fb; }
+    .channel-row.selected { border-color: #5a91b3; background: #eef5fa; }
+    .channel-row input[type="checkbox"] { margin-top: 3px; }
+    .channel-caption {
+      font-size: 0.9rem;
+      font-weight: 600;
+      word-break: break-word;
+    }
+    .channel-meta { font-size: 0.75rem; color: var(--muted); margin-top: 3px; }
+    .channel-footer {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+    }
+    .channel-selected-count { font-size: 0.82rem; color: var(--muted); }
     .field-with-clear {
       display: grid;
       grid-template-columns: 1fr auto;
@@ -275,6 +306,7 @@
       .top { flex-direction: column; }
       .disk { text-align: left; }
       .explorer-row { grid-template-columns: 1fr; }
+      .channel-row { grid-template-columns: auto 1fr; }
       .field-with-clear { grid-template-columns: 1fr; }
     }
   </style>
@@ -340,10 +372,10 @@
         <label class="field-label" for="dl-links">TG Links:</label>
         <div>
           <div class="field-with-clear top">
-            <textarea id="dl-links" name="dl-links" placeholder="One Telegram message link per line" autocomplete="off" spellcheck="false" data-lpignore="true"></textarea>
+            <textarea id="dl-links" name="dl-links" placeholder="Optional — or use Browse Channel below" autocomplete="off" spellcheck="false" data-lpignore="true"></textarea>
             <button type="button" class="clear-btn" id="btn-dl-links-clear" title="Clear links">Clear</button>
           </div>
-          <p class="hint">Server downloads first, then you get the finished file(s). Links are not kept after refresh.</p>
+          <p class="hint">Prefer Browse Channel (caption + size). Paste links only if you already have them.</p>
         </div>
       </div>
       <div class="row">
@@ -357,8 +389,9 @@
         <span id="dl-queue-text">Queue idle</span>
       </div>
       <div class="actions">
+        <button type="button" class="primary" id="btn-browse-channel">Browse Channel</button>
         <button type="button" id="btn-browse-downloads">Browse File Explorer</button>
-        <button type="button" id="btn-download">Download</button>
+        <button type="button" id="btn-download">Download links</button>
       </div>
       <p class="status-bar" id="dl-status"></p>
       <p class="log-label">Log</p>
@@ -452,6 +485,33 @@
     </div>
   </div>
 
+  <div class="modal-backdrop" id="channel-modal" hidden>
+    <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="channel-modal-title">
+      <div class="modal-head">
+        <h3 id="channel-modal-title">Browse channel</h3>
+        <button type="button" id="btn-channel-close">Close</button>
+      </div>
+      <div class="modal-body">
+        <p class="explorer-disk" id="channel-disk">Live from Telegram · caption search · no local index</p>
+        <div class="explorer-toolbar">
+          <input type="search" id="channel-search" placeholder="Search caption…" autocomplete="off" />
+          <button type="button" class="primary" id="btn-channel-search">Search</button>
+          <button type="button" id="btn-channel-refresh">Newest</button>
+        </div>
+        <div class="explorer-list" id="channel-list"></div>
+        <div class="channel-footer">
+          <span class="channel-selected-count" id="channel-selected-count">0 selected</span>
+          <div class="actions" style="margin:0">
+            <button type="button" id="btn-channel-load-more" hidden>Load more</button>
+            <button type="button" id="btn-channel-clear-sel">Clear selection</button>
+            <button type="button" class="primary" id="btn-channel-download">Download selected</button>
+          </div>
+        </div>
+        <p class="status-bar" id="channel-status"></p>
+      </div>
+    </div>
+  </div>
+
   <script>
     let CHANNELS = [];
     /** @type {{ localId: string, file: File, jobId?: string, status: string, progress: number, message: string }[]} */
@@ -465,6 +525,14 @@
     let dlBannerTimer = null;
     let dlBannerJobId = null;
     let explorerFiles = [];
+    /** @type {Array<{msg_id:number,caption:string,name:string,size:number,size_human:string,date:number,link:string}>} */
+    let channelItems = [];
+    /** @type {Map<number, {msg_id:number,caption:string,name:string,size:number,size_human:string}>} */
+    let channelSelected = new Map();
+    let channelNextOffset = 0;
+    let channelHasMore = false;
+    let channelQuery = "";
+    let channelLoading = false;
 
     function escapeHtml(s) {
       return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
@@ -838,6 +906,153 @@
       }
     }
 
+    function closeExplorerModal() {
+      document.getElementById("explorer-modal").hidden = true;
+    }
+
+    function formatChannelDate(ts) {
+      if (!ts) return "";
+      try {
+        return new Date(ts * 1000).toLocaleString();
+      } catch (_) {
+        return "";
+      }
+    }
+
+    function updateChannelSelectedCount() {
+      const n = channelSelected.size;
+      const bytes = [...channelSelected.values()].reduce((s, x) => s + (x.size || 0), 0);
+      document.getElementById("channel-selected-count").textContent =
+        n ? `${n} selected · ${formatBytes(bytes)}` : "0 selected";
+    }
+
+    function renderChannelList() {
+      const list = document.getElementById("channel-list");
+      if (!channelItems.length) {
+        list.innerHTML = `<div class="explorer-empty">${
+          channelLoading ? "Loading…" : "No media found. Try another caption search or Load more."
+        }</div>`;
+        return;
+      }
+      list.innerHTML = channelItems.map((item) => {
+        const checked = channelSelected.has(item.msg_id) ? "checked" : "";
+        const selected = checked ? " selected" : "";
+        const caption = escapeHtml(item.caption || item.name || `message_${item.msg_id}`);
+        const meta = [
+          item.size_human || formatBytes(item.size || 0),
+          formatChannelDate(item.date),
+          `#${item.msg_id}`,
+        ].filter(Boolean).join(" · ");
+        return `<label class="channel-row${selected}" data-msg-id="${item.msg_id}">
+          <input type="checkbox" ${checked} data-msg-id="${item.msg_id}" />
+          <span>
+            <span class="channel-caption">${caption}</span>
+            <div class="channel-meta">${escapeHtml(meta)}</div>
+          </span>
+          <span class="channel-meta">${escapeHtml(item.size_human || formatBytes(item.size || 0))}</span>
+        </label>`;
+      }).join("");
+    }
+
+    async function fetchChannelMedia({ reset = false } = {}) {
+      if (channelLoading) return;
+      channelLoading = true;
+      const status = document.getElementById("channel-status");
+      const loadMoreBtn = document.getElementById("btn-channel-load-more");
+      status.textContent = reset ? "Loading channel…" : "Loading more…";
+      loadMoreBtn.hidden = true;
+      if (reset) {
+        channelItems = [];
+        channelNextOffset = 0;
+        channelHasMore = false;
+        renderChannelList();
+      }
+      try {
+        const data = await api("/api/channel/media", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            channel: selectedChannel("dl-channel"),
+            custom_chat_id: document.getElementById("dl-custom-id").value,
+            query: channelQuery,
+            offset: reset ? 0 : channelNextOffset,
+            limit: 40,
+          }),
+        });
+        const items = data.items || [];
+        if (reset) channelItems = items;
+        else {
+          const seen = new Set(channelItems.map((x) => x.msg_id));
+          for (const item of items) {
+            if (!seen.has(item.msg_id)) channelItems.push(item);
+          }
+        }
+        channelNextOffset = data.next_offset || 0;
+        channelHasMore = !!data.has_more;
+        loadMoreBtn.hidden = !channelHasMore;
+        const modeLabel = data.mode === "search" ? `Search “${channelQuery}”` : "Newest media";
+        status.textContent = `${modeLabel} · showing ${channelItems.length}` +
+          (channelHasMore ? " · more available" : "");
+        document.getElementById("channel-modal-title").textContent =
+          `Browse channel · ${selectedChannel("dl-channel")}`;
+        renderChannelList();
+        updateChannelSelectedCount();
+      } catch (err) {
+        status.textContent = err.message || "Failed to load channel";
+        if (reset) {
+          document.getElementById("channel-list").innerHTML =
+            `<div class="explorer-empty">${escapeHtml(err.message)}</div>`;
+        }
+      } finally {
+        channelLoading = false;
+      }
+    }
+
+    function openChannelModal() {
+      document.getElementById("channel-modal").hidden = false;
+      document.getElementById("channel-search").value = channelQuery;
+      fetchChannelMedia({ reset: true });
+    }
+
+    function closeChannelModal() {
+      document.getElementById("channel-modal").hidden = true;
+    }
+
+    async function downloadChannelSelection() {
+      if (!channelSelected.size) {
+        document.getElementById("channel-status").textContent = "Select at least one file";
+        return;
+      }
+      const msgIds = [...channelSelected.keys()];
+      const knownBytes = [...channelSelected.values()].reduce((s, x) => s + (x.size || 0), 0);
+      const status = document.getElementById("channel-status");
+      status.textContent = `Queuing ${msgIds.length} file(s)…`;
+      try {
+        const data = await api("/api/download", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            msg_ids: msgIds,
+            known_bytes: knownBytes,
+            channel: selectedChannel("dl-channel"),
+            custom_chat_id: document.getElementById("dl-custom-id").value,
+            combine: document.getElementById("dl-combine").checked,
+            decrypt: document.getElementById("dl-decrypt").checked,
+          }),
+        });
+        closeChannelModal();
+        document.getElementById("dl-status").textContent = "Downloading…";
+        setLogBox(document.getElementById("dl-log"), "", false);
+        if (dlBannerTimer && dlBannerTimer !== "done") clearTimeout(dlBannerTimer);
+        dlBannerTimer = null;
+        dlBannerJobId = null;
+        trackJob(data.job);
+        status.textContent = "";
+      } catch (err) {
+        status.textContent = err.message;
+      }
+    }
+
     async function openExplorerModal() {
       document.getElementById("explorer-modal").hidden = false;
       document.getElementById("explorer-list").innerHTML = `<div class="explorer-empty">Loading…</div>`;
@@ -847,10 +1062,6 @@
         document.getElementById("explorer-list").innerHTML =
           `<div class="explorer-empty">${escapeHtml(err.message)}</div>`;
       }
-    }
-
-    function closeExplorerModal() {
-      document.getElementById("explorer-modal").hidden = true;
     }
 
     function addFiles(fileList) {
@@ -979,6 +1190,49 @@
       if (e.target.id === "explorer-modal") closeExplorerModal();
     });
     document.getElementById("btn-browse-downloads").addEventListener("click", openExplorerModal);
+    document.getElementById("btn-browse-channel").addEventListener("click", openChannelModal);
+    document.getElementById("btn-channel-close").addEventListener("click", closeChannelModal);
+    document.getElementById("channel-modal").addEventListener("click", (e) => {
+      if (e.target.id === "channel-modal") closeChannelModal();
+    });
+    document.getElementById("btn-channel-refresh").addEventListener("click", () => {
+      channelQuery = "";
+      document.getElementById("channel-search").value = "";
+      fetchChannelMedia({ reset: true });
+    });
+    document.getElementById("btn-channel-search").addEventListener("click", () => {
+      channelQuery = (document.getElementById("channel-search").value || "").trim();
+      fetchChannelMedia({ reset: true });
+    });
+    document.getElementById("channel-search").addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      channelQuery = (document.getElementById("channel-search").value || "").trim();
+      fetchChannelMedia({ reset: true });
+    });
+    document.getElementById("btn-channel-load-more").addEventListener("click", () => {
+      fetchChannelMedia({ reset: false });
+    });
+    document.getElementById("btn-channel-clear-sel").addEventListener("click", () => {
+      channelSelected.clear();
+      renderChannelList();
+      updateChannelSelectedCount();
+    });
+    document.getElementById("btn-channel-download").addEventListener("click", () => {
+      downloadChannelSelection();
+    });
+    document.getElementById("channel-list").addEventListener("change", (e) => {
+      const input = e.target.closest('input[type="checkbox"][data-msg-id]');
+      if (!input) return;
+      const msgId = Number(input.getAttribute("data-msg-id"));
+      const item = channelItems.find((x) => x.msg_id === msgId);
+      if (!item) return;
+      if (input.checked) channelSelected.set(msgId, item);
+      else channelSelected.delete(msgId);
+      const row = input.closest(".channel-row");
+      if (row) row.classList.toggle("selected", input.checked);
+      updateChannelSelectedCount();
+    });
     document.getElementById("btn-explorer-refresh").addEventListener("click", () => {
       loadExplorerFiles().catch((err) => {
         document.getElementById("explorer-list").innerHTML =
@@ -1019,6 +1273,7 @@
       if (e.key !== "Escape") return;
       closeAuthModal();
       closeExplorerModal();
+      closeChannelModal();
     });
 
     document.getElementById("btn-download").addEventListener("click", async () => {

@@ -257,6 +257,201 @@ def get_pyrogram_client():
     return pyrogram.Client
 
 
+# Separate from tg-upload's profile.session so browse does not lock download jobs.
+_browser_lock = threading.Lock()
+
+
+def normalize_chat_id(chat_id):
+    text = str(chat_id).strip()
+    if not text:
+        raise ValueError("chat_id is empty")
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
+def chat_msg_to_link(chat_id, msg_id) -> str:
+    """Build a private-channel style t.me link from chat_id + message id."""
+    cid = str(chat_id).strip()
+    mid = int(msg_id)
+    if cid.startswith("-100") and cid[4:].isdigit():
+        return f"https://t.me/c/{cid[4:]}/{mid}"
+    if cid.lstrip("-").isdigit():
+        # Already a bare numeric id without -100 prefix
+        bare = cid.lstrip("-")
+        return f"https://t.me/c/{bare}/{mid}"
+    # Public username
+    return f"https://t.me/{cid.lstrip('@')}/{mid}"
+
+
+def links_from_msg_ids(chat_id, msg_ids: list[int]) -> list[str]:
+    return [chat_msg_to_link(chat_id, mid) for mid in msg_ids]
+
+
+def _media_from_message(message):
+    """Return (size, telegram_file_name) for downloadable media, or None."""
+    if not message or getattr(message, "empty", False):
+        return None
+    for attr in ("document", "video", "audio", "animation", "voice", "video_note"):
+        media = getattr(message, attr, None)
+        if media is not None:
+            size = int(getattr(media, "file_size", 0) or 0)
+            name = (getattr(media, "file_name", None) or "").strip()
+            return size, name
+    return None
+
+
+def _format_message_item(message, chat_id) -> Optional[dict]:
+    media = _media_from_message(message)
+    if media is None:
+        return None
+    size, file_name = media
+    caption = (message.caption or "").strip()
+    # Caption is the true name for this app; filename is fallback only.
+    display = caption or file_name or f"message_{message.id}"
+    date_ts = 0.0
+    if message.date is not None:
+        try:
+            date_ts = float(message.date.timestamp())
+        except Exception:
+            date_ts = 0.0
+    return {
+        "msg_id": int(message.id),
+        "caption": caption,
+        "name": display,
+        "file_name": file_name,
+        "size": size,
+        "date": date_ts,
+        "link": chat_msg_to_link(chat_id, message.id),
+    }
+
+
+def _with_browser_client(fn):
+    """
+    Run fn(client) with a short-lived bot client on a dedicated session name.
+    Bot token login does not need interactive Authorize.
+    """
+    settings = get_settings()
+    if not settings["api_id"] or not settings["api_hash"] or not settings["bot_token"]:
+        raise RuntimeError("API_ID, API_HASH, and BOT_TOKEN are required")
+
+    target_directory = settings["tg_upload_dir"]
+    os.makedirs(target_directory, exist_ok=True)
+    Client = get_pyrogram_client()
+
+    with _browser_lock:
+        original_dir = os.getcwd()
+        try:
+            os.chdir(target_directory)
+            client = Client(
+                "browser",
+                api_id=int(settings["api_id"]),
+                api_hash=settings["api_hash"],
+                bot_token=settings["bot_token"],
+            )
+            with client:
+                return fn(client)
+        finally:
+            os.chdir(original_dir)
+
+
+def list_channel_media(
+    chat_id,
+    query: str = "",
+    offset: int = 0,
+    limit: int = 40,
+) -> dict:
+    """
+    Live-list channel media (no local index).
+
+    - Empty query: walk chat history (newest first), media only.
+      `offset` is the last seen message id (0 = start from newest).
+    - Non-empty query: Telegram caption/text search.
+      `offset` is how many search hits to skip.
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 100:
+        limit = 100
+    if offset < 0:
+        offset = 0
+
+    resolved_chat = normalize_chat_id(chat_id)
+    q = (query or "").strip()
+
+    def _run(client):
+        items = []
+        next_offset = offset
+        has_more = False
+
+        if q:
+            # Fetch a wider batch so we can skip non-media search hits.
+            fetch_n = min(200, max(limit * 4, limit))
+            batch = list(
+                client.search_messages(
+                    resolved_chat,
+                    query=q,
+                    limit=fetch_n,
+                    offset=offset,
+                )
+            )
+            scanned = 0
+            for msg in batch:
+                scanned += 1
+                info = _format_message_item(msg, resolved_chat)
+                if info:
+                    items.append(info)
+                    if len(items) >= limit:
+                        break
+            next_offset = offset + scanned
+            has_more = scanned >= fetch_n or len(items) >= limit
+            mode = "search"
+        else:
+            last_id = offset
+            scanned = 0
+            max_scan = limit * 15
+            while len(items) < limit and scanned < max_scan:
+                chunk_limit = min(100, max(30, (limit - len(items)) * 5))
+                chunk = list(
+                    client.get_chat_history(
+                        resolved_chat,
+                        limit=chunk_limit,
+                        offset_id=last_id or 0,
+                    )
+                )
+                if not chunk:
+                    break
+                for msg in chunk:
+                    last_id = int(msg.id)
+                    scanned += 1
+                    info = _format_message_item(msg, resolved_chat)
+                    if info:
+                        items.append(info)
+                        if len(items) >= limit:
+                            break
+                if len(chunk) < chunk_limit:
+                    break
+            next_offset = last_id
+            has_more = len(items) >= limit
+            mode = "history"
+
+        return {
+            "items": items,
+            "mode": mode,
+            "query": q,
+            "offset": offset,
+            "next_offset": next_offset,
+            "has_more": has_more,
+            "chat_id": str(resolved_chat),
+        }
+
+    try:
+        return _with_browser_client(_run)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to list channel media: {exc}") from exc
+
+
 def get_caption_from_link(link):
     settings = get_settings()
     chat_id, msg_id = parse_telegram_link(link)

@@ -244,7 +244,7 @@ def _register_handlers():
         combine = job.payload.get("combine", True)
         decrypt = job.payload.get("decrypt", True)
 
-        required = estimate_download_bytes(len(links))
+        required = estimate_download_bytes(len(links), known_bytes=int(job.file_size or 0))
         check = check_free_space(settings["data_dir"], required, settings["disk_reserve_bytes"])
         if not check.ok:
             raise RuntimeError(check.message)
@@ -606,6 +606,39 @@ async def api_upload_abort(upload_id: str):
     return {"ok": True}
 
 
+@app.post("/api/channel/media")
+async def api_channel_media(request: Request):
+    """Live-list / search channel media (caption + size). No local index."""
+    body = await request.json()
+    channel = body.get("channel", "Custom Channel")
+    custom_chat_id = body.get("custom_chat_id", "")
+    chat_id = _resolve_chat_id(channel, custom_chat_id)
+    query = str(body.get("query") or "").strip()
+    try:
+        offset = int(body.get("offset") or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid offset") from exc
+    try:
+        limit = int(body.get("limit") or 40)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid limit") from exc
+
+    try:
+        result = pipeline.list_channel_media(
+            chat_id=chat_id,
+            query=query,
+            offset=offset,
+            limit=limit,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    for item in result.get("items", []):
+        item["size_human"] = format_bytes(int(item.get("size") or 0))
+
+    return {"ok": True, **result}
+
+
 @app.post("/api/download")
 async def api_download(request: Request):
     settings = get_settings()
@@ -615,16 +648,39 @@ async def api_download(request: Request):
         links = [str(x).strip() for x in links_raw if str(x).strip()]
     else:
         links = [line.strip() for line in str(links_raw).splitlines() if line.strip()]
-    if not links:
-        raise HTTPException(status_code=400, detail="Enter at least one Telegram link")
 
     channel = body.get("channel", "Custom Channel")
     custom_chat_id = body.get("custom_chat_id", "")
     chat_id = _resolve_chat_id(channel, custom_chat_id)
+
+    # Prefer explicit msg_ids from channel browser (build t.me links server-side).
+    msg_ids_raw = body.get("msg_ids") or []
+    if msg_ids_raw and not links:
+        msg_ids = []
+        for raw in msg_ids_raw:
+            try:
+                msg_ids.append(int(raw))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid msg_id: {raw}") from exc
+        if not msg_ids:
+            raise HTTPException(status_code=400, detail="Select at least one file")
+        links = pipeline.links_from_msg_ids(chat_id, msg_ids)
+
+    if not links:
+        raise HTTPException(
+            status_code=400,
+            detail="Enter Telegram links or select files from Browse Channel",
+        )
+
     combine = bool(body.get("combine", True))
     decrypt = bool(body.get("decrypt", True))
 
-    required = estimate_download_bytes(len(links))
+    try:
+        known_bytes = int(body.get("known_bytes") or 0)
+    except (TypeError, ValueError):
+        known_bytes = 0
+
+    required = estimate_download_bytes(len(links), known_bytes=known_bytes)
     check = check_free_space(settings["data_dir"], required, settings["disk_reserve_bytes"])
     if not check.ok:
         raise HTTPException(status_code=507, detail=check.message)
@@ -637,14 +693,15 @@ async def api_download(request: Request):
             "combine": combine,
             "decrypt": decrypt,
         },
-        file_name=f"{len(links)} link(s)",
-        file_size=0,
+        file_name=f"{len(links)} file(s)",
+        file_size=known_bytes,
     )
 
     return {
         "ok": True,
         "job": _job_to_dict(job),
         "disk_check": check.__dict__,
+        "links": links,
     }
 
 
