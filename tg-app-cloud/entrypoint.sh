@@ -17,6 +17,12 @@ persist_session() {
   if [ -f "$TG_UPLOAD_DIR/profile.session-journal" ]; then
     cp -f "$TG_UPLOAD_DIR/profile.session-journal" "$DATA_DIR/profile.session-journal"
   fi
+  if [ -f "$TG_UPLOAD_DIR/browser.session" ]; then
+    cp -f "$TG_UPLOAD_DIR/browser.session" "$DATA_DIR/browser.session"
+  fi
+  if [ -f "$TG_UPLOAD_DIR/browser.session-journal" ]; then
+    cp -f "$TG_UPLOAD_DIR/browser.session-journal" "$DATA_DIR/browser.session-journal"
+  fi
 }
 
 # Restore Telegram session from the data volume (survives image rebuilds)
@@ -25,6 +31,12 @@ if [ -f "$DATA_DIR/profile.session" ]; then
 fi
 if [ -f "$DATA_DIR/profile.session-journal" ]; then
   cp -f "$DATA_DIR/profile.session-journal" "$TG_UPLOAD_DIR/profile.session-journal"
+fi
+if [ -f "$DATA_DIR/browser.session" ]; then
+  cp -f "$DATA_DIR/browser.session" "$TG_UPLOAD_DIR/browser.session"
+fi
+if [ -f "$DATA_DIR/browser.session-journal" ]; then
+  cp -f "$DATA_DIR/browser.session-journal" "$TG_UPLOAD_DIR/browser.session-journal"
 fi
 
 # NAS bind mounts are often root-owned; app runs as uid 1000

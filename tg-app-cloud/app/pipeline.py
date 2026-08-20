@@ -257,8 +257,9 @@ def get_pyrogram_client():
     return pyrogram.Client
 
 
-# Separate from tg-upload's profile.session so browse does not lock download jobs.
+# Long-lived browse client (separate from tg-upload profile.session).
 _browser_lock = threading.Lock()
+_browser_client = None
 
 
 def normalize_chat_id(chat_id):
@@ -278,10 +279,8 @@ def chat_msg_to_link(chat_id, msg_id) -> str:
     if cid.startswith("-100") and cid[4:].isdigit():
         return f"https://t.me/c/{cid[4:]}/{mid}"
     if cid.lstrip("-").isdigit():
-        # Already a bare numeric id without -100 prefix
         bare = cid.lstrip("-")
         return f"https://t.me/c/{bare}/{mid}"
-    # Public username
     return f"https://t.me/{cid.lstrip('@')}/{mid}"
 
 
@@ -308,7 +307,6 @@ def _format_message_item(message, chat_id) -> Optional[dict]:
         return None
     size, file_name = media
     caption = (message.caption or "").strip()
-    # Caption is the true name for this app; filename is fallback only.
     display = caption or file_name or f"message_{message.id}"
     date_ts = 0.0
     if message.date is not None:
@@ -327,53 +325,121 @@ def _format_message_item(message, chat_id) -> Optional[dict]:
     }
 
 
-def _with_browser_client(fn):
-    """
-    Run fn(client) with a short-lived bot client on a dedicated session name.
-    Bot token login does not need interactive Authorize.
-    """
+def _persist_browser_session() -> None:
+    settings = get_settings()
+    src_dir = settings["tg_upload_dir"]
+    data_dir = settings["data_dir"]
+    os.makedirs(data_dir, exist_ok=True)
+    for name in ("browser.session", "browser.session-journal"):
+        src = os.path.join(src_dir, name)
+        if os.path.isfile(src):
+            try:
+                shutil.copy2(src, os.path.join(data_dir, name))
+            except OSError as exc:
+                _log(f"WARN: could not persist {name}: {exc}")
+
+
+def _restore_browser_session() -> None:
+    settings = get_settings()
+    src_dir = settings["data_dir"]
+    dest_dir = settings["tg_upload_dir"]
+    os.makedirs(dest_dir, exist_ok=True)
+    for name in ("browser.session", "browser.session-journal"):
+        src = os.path.join(src_dir, name)
+        dest = os.path.join(dest_dir, name)
+        if os.path.isfile(src) and not os.path.isfile(dest):
+            try:
+                shutil.copy2(src, dest)
+            except OSError as exc:
+                _log(f"WARN: could not restore {name}: {exc}")
+
+
+def _ensure_browser_client():
+    """Start (or reuse) a long-lived Pyrogram bot client for channel browse."""
+    global _browser_client, _browser_workdir
     settings = get_settings()
     if not settings["api_id"] or not settings["api_hash"] or not settings["bot_token"]:
         raise RuntimeError("API_ID, API_HASH, and BOT_TOKEN are required")
 
     target_directory = settings["tg_upload_dir"]
     os.makedirs(target_directory, exist_ok=True)
-    Client = get_pyrogram_client()
+    _restore_browser_session()
 
-    with _browser_lock:
-        original_dir = os.getcwd()
+    if _browser_client is not None:
         try:
-            os.chdir(target_directory)
-            client = Client(
-                "browser",
-                api_id=int(settings["api_id"]),
-                api_hash=settings["api_hash"],
-                bot_token=settings["bot_token"],
-            )
-            with client:
-                return fn(client)
-        finally:
-            os.chdir(original_dir)
+            if _browser_client.is_connected:
+                return _browser_client
+        except Exception:
+            pass
+        try:
+            _browser_client.stop()
+        except Exception:
+            pass
+        _browser_client = None
+
+    Client = get_pyrogram_client()
+    previous_cwd = os.getcwd()
+    os.chdir(target_directory)
+    try:
+        client = Client(
+            "browser",
+            api_id=int(settings["api_id"]),
+            api_hash=settings["api_hash"],
+            bot_token=settings["bot_token"],
+            no_updates=True,
+            in_memory=False,
+        )
+        client.start()
+        _browser_client = client
+        _persist_browser_session()
+        _log("Browser Telegram client started")
+        return _browser_client
+    except Exception:
+        _browser_client = None
+        raise
+    finally:
+        try:
+            os.chdir(previous_cwd)
+        except Exception:
+            pass
+
+
+def stop_browser_client() -> None:
+    global _browser_client
+    with _browser_lock:
+        if _browser_client is None:
+            return
+        try:
+            _browser_client.stop()
+        except Exception as exc:
+            _log(f"WARN: stopping browser client: {exc}")
+        _browser_client = None
+        _persist_browser_session()
+
+
+def _with_browser_client(fn):
+    """Run fn(client) on the shared browse client (thread-safe)."""
+    with _browser_lock:
+        client = _ensure_browser_client()
+        return fn(client)
 
 
 def list_channel_media(
     chat_id,
     query: str = "",
     offset: int = 0,
-    limit: int = 40,
+    limit: int = 30,
 ) -> dict:
     """
     Live-list channel media (no local index).
 
-    - Empty query: walk chat history (newest first), media only.
-      `offset` is the last seen message id (0 = start from newest).
-    - Non-empty query: Telegram caption/text search.
-      `offset` is how many search hits to skip.
+    Uses Telegram `search_messages` with a document filter (fast, one round-trip)
+    instead of walking full chat history. `offset` skips that many search hits.
     """
     if limit < 1:
         limit = 1
-    if limit > 100:
-        limit = 100
+    if limit > 50:
+        limit = 50
     if offset < 0:
         offset = 0
 
@@ -382,12 +448,16 @@ def list_channel_media(
 
     def _run(client):
         items = []
-        next_offset = offset
-        has_more = False
+        fetch_n = min(60, max(limit + 5, limit))
+        mode = "search" if q else "history"
+
+        try:
+            from pyrogram.enums import MessagesFilter
+            doc_filter = MessagesFilter.DOCUMENT
+        except Exception:
+            doc_filter = None
 
         if q:
-            # Fetch a wider batch so we can skip non-media search hits.
-            fetch_n = min(200, max(limit * 4, limit))
             batch = list(
                 client.search_messages(
                     resolved_chat,
@@ -396,45 +466,34 @@ def list_channel_media(
                     offset=offset,
                 )
             )
-            scanned = 0
-            for msg in batch:
-                scanned += 1
-                info = _format_message_item(msg, resolved_chat)
-                if info:
-                    items.append(info)
-                    if len(items) >= limit:
-                        break
-            next_offset = offset + scanned
-            has_more = scanned >= fetch_n or len(items) >= limit
-            mode = "search"
-        else:
-            last_id = offset
-            scanned = 0
-            max_scan = limit * 15
-            while len(items) < limit and scanned < max_scan:
-                chunk_limit = min(100, max(30, (limit - len(items)) * 5))
-                chunk = list(
-                    client.get_chat_history(
-                        resolved_chat,
-                        limit=chunk_limit,
-                        offset_id=last_id or 0,
-                    )
+        elif doc_filter is not None:
+            # Document filter matches encrypted/split uploads from this app.
+            batch = list(
+                client.search_messages(
+                    resolved_chat,
+                    filter=doc_filter,
+                    limit=fetch_n,
+                    offset=offset,
                 )
-                if not chunk:
+            )
+        else:
+            batch = list(
+                client.get_chat_history(
+                    resolved_chat,
+                    limit=fetch_n,
+                    offset_id=0,
+                )
+            )
+
+        for msg in batch:
+            info = _format_message_item(msg, resolved_chat)
+            if info:
+                items.append(info)
+                if len(items) >= limit:
                     break
-                for msg in chunk:
-                    last_id = int(msg.id)
-                    scanned += 1
-                    info = _format_message_item(msg, resolved_chat)
-                    if info:
-                        items.append(info)
-                        if len(items) >= limit:
-                            break
-                if len(chunk) < chunk_limit:
-                    break
-            next_offset = last_id
-            has_more = len(items) >= limit
-            mode = "history"
+
+        next_offset = offset + len(batch)
+        has_more = len(batch) >= fetch_n
 
         return {
             "items": items,
@@ -449,7 +508,20 @@ def list_channel_media(
     try:
         return _with_browser_client(_run)
     except Exception as exc:
+        _reset_browser_client()
         raise RuntimeError(f"Failed to list channel media: {exc}") from exc
+
+
+def _reset_browser_client() -> None:
+    global _browser_client
+    with _browser_lock:
+        if _browser_client is None:
+            return
+        try:
+            _browser_client.stop()
+        except Exception:
+            pass
+        _browser_client = None
 
 
 def get_caption_from_link(link):

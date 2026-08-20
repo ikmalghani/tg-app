@@ -4,6 +4,7 @@ import shutil
 import threading
 import time
 import uuid
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -28,6 +29,8 @@ UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 _upload_sessions: dict[str, dict] = {}
 _upload_sessions_lock = threading.Lock()
 _UPLOAD_SESSION_TTL_SEC = 6 * 60 * 60
+# Stay under Cloudflare / Coolify proxy idle timeouts (~60s).
+_CHANNEL_MEDIA_TIMEOUT_SEC = 45
 
 
 def _redact_command(command: str) -> str:
@@ -275,8 +278,17 @@ def _register_handlers():
 async def lifespan(_app: FastAPI):
     _register_handlers()
     job_queue.start()
+    # Warm browse client in background so first Browse Channel is fast.
+    def _warm():
+        try:
+            pipeline._with_browser_client(lambda _c: None)
+        except Exception as exc:
+            print(f"Browser client warm-up skipped: {exc}", flush=True)
+
+    threading.Thread(target=_warm, name="browser-warm", daemon=True).start()
     yield
     job_queue.stop()
+    pipeline.stop_browser_client()
 
 
 app = FastAPI(title="tg-app-cloud", lifespan=lifespan)
@@ -619,17 +631,29 @@ async def api_channel_media(request: Request):
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Invalid offset") from exc
     try:
-        limit = int(body.get("limit") or 40)
+        limit = int(body.get("limit") or 30)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Invalid limit") from exc
 
     try:
-        result = pipeline.list_channel_media(
-            chat_id=chat_id,
-            query=query,
-            offset=offset,
-            limit=limit,
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                pipeline.list_channel_media,
+                chat_id,
+                query,
+                offset,
+                limit,
+            ),
+            timeout=_CHANNEL_MEDIA_TIMEOUT_SEC,
         )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Channel browse timed out talking to Telegram. "
+                "Retry — the bot must be an admin in this channel."
+            ),
+        ) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
