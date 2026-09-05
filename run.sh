@@ -28,4 +28,10 @@ if [[ -z "${PYTHON}" ]]; then
   exit 1
 fi
 
-exec "${PYTHON}" "${ROOT_DIR}/tg-app.py"
+# Launch the app detached from this terminal, then close the terminal window.
+nohup "${PYTHON}" "${ROOT_DIR}/tg-app.py" >/dev/null 2>&1 &
+
+# Give the app a brief moment to start before exiting the shell.
+sleep 1
+
+exit 0

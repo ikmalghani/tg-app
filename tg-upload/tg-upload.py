@@ -419,6 +419,121 @@ elif not args.api_id or not args.api_hash:
 
 from pyrogram import Client, enums, errors
 
+# Increase Telegram API request timeouts/retries above pyrogram's defaults
+# (15s per request, 10 retries) so slow or flaky networks do not abort uploads.
+# The defaults are captured into function signatures at import time, so they are
+# patched here before any request is made.
+def _raise_request_timeouts(timeout=60, retries=15):
+    try:
+        from pyrogram.session import Session as _Session
+        _Session.WAIT_TIMEOUT = timeout
+        if len(_Session.send.__defaults__) >= 2:
+            _Session.send.__defaults__ = (_Session.send.__defaults__[0], timeout)
+        if len(_Session.invoke.__defaults__) >= 3:
+            _Session.invoke.__defaults__ = (retries, timeout, _Session.invoke.__defaults__[2])
+    except Exception:
+        pass
+    try:
+        from pyrogram.methods.advanced.invoke import Invoke as _Invoke
+        if len(_Invoke.invoke.__defaults__) >= 3:
+            _Invoke.invoke.__defaults__ = (retries, timeout, _Invoke.invoke.__defaults__[2])
+    except Exception:
+        pass
+
+def _harden_session_storage(timeout=30):
+    """Pyrogram opens the .session SQLite file with timeout=1 and VACUUMs it.
+
+    A second upload then fails immediately with 'database is locked' if another
+    tg-upload process still holds the session. Wait instead, and skip VACUUM.
+    """
+    try:
+        import sqlite3 as _sqlite3
+        from pyrogram.storage.file_storage import FileStorage as _FileStorage
+    except Exception:
+        return
+
+    def update(self):
+        version = self.version()
+        original = version
+        if version == 1:
+            with self.conn:
+                self.conn.execute("DELETE FROM peers")
+            version += 1
+        if version == 2:
+            with self.conn:
+                self.conn.execute("ALTER TABLE sessions ADD api_id INTEGER")
+            version += 1
+        if version != original:
+            self.version(version)
+
+    async def open_(self):
+        path = self.database
+        file_exists = path.is_file()
+        attempt = 0
+        while True:
+            try:
+                self.conn = _sqlite3.connect(str(path), timeout=timeout, check_same_thread=False)
+                self.conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
+                if not file_exists:
+                    self.create()
+                else:
+                    self.update()
+                return
+            except _sqlite3.OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" not in message and "busy" not in message:
+                    raise
+                if self.conn is not None:
+                    try:
+                        self.conn.close()
+                    except Exception:
+                        pass
+                    self.conn = None
+                attempt += 1
+                if attempt == 1 or attempt % 5 == 0:
+                    print(
+                        f"Waiting for Telegram session file to become free "
+                        f"(attempt {attempt})...",
+                        flush=True,
+                    )
+                await __import__("asyncio").sleep(2)
+
+    _FileStorage.update = update
+    _FileStorage.open = open_
+
+    def _retry_locked(method):
+        async def wrapper(self, *args, **kwargs):
+            attempt = 0
+            while True:
+                try:
+                    result = method(self, *args, **kwargs)
+                    if hasattr(result, "__await__"):
+                        return await result
+                    return result
+                except _sqlite3.OperationalError as exc:
+                    message = str(exc).lower()
+                    if "locked" not in message and "busy" not in message:
+                        raise
+                    attempt += 1
+                    if attempt == 1 or attempt % 5 == 0:
+                        print(
+                            f"Waiting for Telegram session file to become free "
+                            f"during {method.__name__} (attempt {attempt})...",
+                            flush=True,
+                        )
+                    await __import__("asyncio").sleep(2)
+        return wrapper
+
+    try:
+        from pyrogram.storage.sqlite_storage import SQLiteStorage as _SQLiteStorage
+        _SQLiteStorage.update_peers = _retry_locked(_SQLiteStorage.update_peers)
+        _SQLiteStorage.save = _retry_locked(_SQLiteStorage.save)
+    except Exception:
+        pass
+
+_raise_request_timeouts()
+_harden_session_storage()
+
 if args.phone:
   client = Client(
     args.profile,
