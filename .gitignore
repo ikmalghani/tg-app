@@ -25,4 +25,5 @@ crypt.conf
 **/venv/
 **/tgappenv/
 **/profile.session*
+.tg-app.lock
 tg-app-cloud/data/

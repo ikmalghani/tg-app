@@ -4,6 +4,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -135,7 +136,13 @@ _original_stdout = sys.stdout
 _current_log_channel = "upload"
 _active_children = []
 _busy_operation = None
+_cancel_requested = False
+_close_after_cancel = False
 _instance_lock_fd = None
+
+class OperationCancelled(Exception):
+    """Raised when the user cancels an in-progress upload."""
+    pass
 
 LOG_CHANNELS = ("upload", "download", "authorize")
 
@@ -227,6 +234,75 @@ def log_message(message):
             pass
     append_log_entry(text, is_progress=False)
 
+def raise_if_cancelled():
+    if _cancel_requested:
+        raise OperationCancelled()
+
+def _popen_extra_kwargs():
+    if platform.system() != "Windows":
+        return {"start_new_session": True}
+    return {}
+
+def _terminate_process(process, timeout=3):
+    if process.poll() is not None:
+        return
+    try:
+        if platform.system() != "Windows":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except OSError:
+                process.terminate()
+        else:
+            process.terminate()
+    except OSError:
+        pass
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if process.poll() is not None:
+            return
+        time.sleep(0.1)
+    try:
+        if platform.system() != "Windows":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                process.kill()
+        else:
+            process.kill()
+    except OSError:
+        pass
+
+def _stop_active_children():
+    for child in list(_active_children):
+        _terminate_process(child)
+
+def request_upload_cancel():
+    global _cancel_requested
+    if _busy_operation != "upload" or _cancel_requested:
+        return
+    _cancel_requested = True
+    log_message("Processing: Upload - Cancel requested by user, stopping current work")
+    if "button_cancel_upload" in globals():
+        try:
+            button_cancel_upload.configure(state=tk.DISABLED, text="Cancelling...")
+            if "root" in globals() and root.winfo_exists():
+                root.update_idletasks()
+        except tk.TclError:
+            pass
+    _stop_active_children()
+
+def copy_file_cancellable(src, dst):
+    chunk_size = 8 * 1024 * 1024
+    with open(src, "rb") as source, open(dst, "wb") as dest:
+        while True:
+            raise_if_cancelled()
+            chunk = source.read(chunk_size)
+            if not chunk:
+                break
+            dest.write(chunk)
+            _pump_ui(0)
+    shutil.copystat(src, dst)
+
 def run_subprocess(command_args, working_directory=None):
     process = subprocess.Popen(
         command_args,
@@ -234,6 +310,7 @@ def run_subprocess(command_args, working_directory=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         bufsize=0,
+        **_popen_extra_kwargs(),
     )
     _active_children.append(process)
 
@@ -268,6 +345,9 @@ def run_subprocess(command_args, working_directory=None):
     progress_line_active = False
     progress_line_length = 0
     while not output_done or process.poll() is None:
+        if _cancel_requested:
+            _terminate_process(process)
+            break
         try:
             item = output_queue.get(timeout=0.1)
             if item is None:
@@ -305,6 +385,13 @@ def run_subprocess(command_args, working_directory=None):
         sys.stdout.flush()
 
     try:
+        if _cancel_requested:
+            _terminate_process(process)
+            try:
+                process.wait(timeout=2)
+            except Exception:
+                pass
+            raise OperationCancelled()
         returncode = process.wait()
     finally:
         if process in _active_children:
@@ -334,7 +421,9 @@ def run_subprocess_passthrough(command_args, working_directory=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         bufsize=0,
+        **_popen_extra_kwargs(),
     )
+    _active_children.append(process)
 
     output_queue = queue.Queue()
 
@@ -356,6 +445,9 @@ def run_subprocess_passthrough(command_args, working_directory=None):
     buffer = []
     output_done = False
     while not output_done or process.poll() is None:
+        if _cancel_requested:
+            _terminate_process(process)
+            break
         try:
             item = output_queue.get(timeout=0.05)
             if item is None:
@@ -381,7 +473,18 @@ def run_subprocess_passthrough(command_args, working_directory=None):
         sys.stdout.write("".join(buffer))
         sys.stdout.flush()
 
-    returncode = process.wait()
+    try:
+        if _cancel_requested:
+            _terminate_process(process)
+            try:
+                process.wait(timeout=2)
+            except Exception:
+                pass
+            raise OperationCancelled()
+        returncode = process.wait()
+    finally:
+        if process in _active_children:
+            _active_children.remove(process)
     return subprocess.CompletedProcess(
         command_args,
         returncode,
@@ -408,6 +511,7 @@ def _pump_ui(wait_s=0.1):
         except tk.TclError:
             pass
     time.sleep(wait_s)
+    raise_if_cancelled()
 
 def _acquire_file_lock(lock_path, exclusive=True, nonblocking=False):
     fd = open(lock_path, "a+")
@@ -466,6 +570,7 @@ def telegram_session_lock(wait_message="Waiting for another Telegram task to fin
     fd = _acquire_file_lock(lock_path, exclusive=True, nonblocking=True)
     logged_wait = False
     while fd is None:
+        raise_if_cancelled()
         if not logged_wait:
             log_message(wait_message)
             logged_wait = True
@@ -686,13 +791,23 @@ def split_file(file_path, split_size=1500 * 1024 * 1024):
         f"with chunk size {split_size} bytes"
     )
 
+    chunk_size = 8 * 1024 * 1024
     part_files = []
-    with open(file_path, 'rb') as f:
+    with open(file_path, "rb") as source:
         for i in range(num_parts):
+            raise_if_cancelled()
             part_file_name = f"{file_path}.part{i:02d}"
             log_message(f"Processing: {os.path.basename(file_path)} - Creating split part {os.path.basename(part_file_name)}")
-            with open(part_file_name, 'wb') as part_file:
-                part_file.write(f.read(split_size))
+            remaining = split_size
+            with open(part_file_name, "wb") as part_file:
+                while remaining > 0:
+                    raise_if_cancelled()
+                    chunk = source.read(min(chunk_size, remaining))
+                    if not chunk:
+                        break
+                    part_file.write(chunk)
+                    remaining -= len(chunk)
+                    _pump_ui(0)
             part_files.append(part_file_name)
 
     log_message(f"Completed: {os.path.basename(file_path)} - Created {len(part_files)} split part(s)")
@@ -1126,8 +1241,12 @@ def set_upload_button_busy(is_busy):
         return
     if is_busy:
         button_upload.configure(state=tk.DISABLED, text="Uploading...")
+        if "button_cancel_upload" in globals():
+            button_cancel_upload.configure(state=tk.NORMAL, text="Cancel")
     else:
         button_upload.configure(state=tk.NORMAL, text="Upload")
+        if "button_cancel_upload" in globals():
+            button_cancel_upload.configure(state=tk.DISABLED, text="Cancel")
     if "root" in globals() and root.winfo_exists():
         root.update_idletasks()
 
@@ -1141,9 +1260,21 @@ def set_download_button_busy(is_busy):
     if "root" in globals() and root.winfo_exists():
         root.update_idletasks()
 
+def _cleanup_staging_dir(staging_dir):
+    log_message(f"Processing: Upload - Cleaning up staging folder: {staging_dir}")
+    shutil.rmtree(staging_dir, ignore_errors=True)
+    if os.path.isdir(staging_dir):
+        time.sleep(0.2)
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    if os.path.isdir(staging_dir):
+        log_message(f"SKIPPED: Upload - Could not fully remove staging folder: {staging_dir}")
+    else:
+        log_message(f"Completed: Upload - Cleaned up staging folder: {staging_dir}")
+
 def upload():
-    global _current_log_channel, _busy_operation
+    global _current_log_channel, _busy_operation, _cancel_requested, _close_after_cancel
     _current_log_channel = "upload"
+    _cancel_requested = False
     _busy_operation = "upload"
     set_upload_button_busy(True)
     try:
@@ -1177,7 +1308,9 @@ def upload():
             messagebox.showerror("Error", f"Config file not found: {config_file_path}")
             return
 
+        raise_if_cancelled()
         stop_leftover_tg_uploads()
+        raise_if_cancelled()
 
         min_split_size = int(1.9 * 1024 * 1024 * 1024)  # Split before Telegram's 2GB upload limit
         if delete_on_done:
@@ -1187,6 +1320,7 @@ def upload():
 
         found_any_file = False
         for original_file in iter_upload_source_files(source_type, selected_path):
+            raise_if_cancelled()
             found_any_file = True
             staging_dir = tempfile.mkdtemp(prefix="tg-staging-")
             staged_filename = os.path.basename(original_file)
@@ -1196,7 +1330,7 @@ def upload():
 
             staging_keep = False
             try:
-                shutil.copy2(original_file, staged_file)
+                copy_file_cancellable(original_file, staged_file)
                 log_message(f"Completed: Upload - Copied to staging: {staged_file}")
                 current_file = staged_file
                 files_to_upload = []
@@ -1209,10 +1343,13 @@ def upload():
                             current_file = encrypt_file_for_upload(current_file, config_file_path)
                     else:
                         log_message(f"SKIPPED: {staged_filename} - Encrypt option disabled by user")
+                except OperationCancelled:
+                    raise
                 except Exception as exc:
                     messagebox.showerror("Encryption Error", str(exc))
                     return
 
+                raise_if_cancelled()
                 if ".part" in os.path.basename(current_file):
                     log_message(f"SKIPPED: {os.path.basename(current_file)} - File is already a split part and will be uploaded as-is")
                     files_to_upload.append(current_file)
@@ -1232,6 +1369,7 @@ def upload():
                     files_to_upload.append(current_file)
 
                 for file_path in files_to_upload:
+                    raise_if_cancelled()
                     filename = os.path.basename(file_path)
                     log_message(f"Processing: Upload - Uploading file now: {filename}")
                     try:
@@ -1244,6 +1382,8 @@ def upload():
                             ],
                             lock_session=False,
                         )
+                    except OperationCancelled:
+                        raise
                     except Exception as exc:
                         staging_keep = True
                         show_copyable_error("Upload Error", str(exc))
@@ -1261,24 +1401,47 @@ def upload():
                         delete_empty_directories(os.path.dirname(original_file), selected_path)
 
             finally:
-                still_running = any(child.poll() is None for child in list(_active_children))
-                if still_running or staging_keep:
-                    log_message(
-                        f"SKIPPED: Upload - Leaving staging folder in place: {staging_dir}"
-                    )
+                if _cancel_requested:
+                    _stop_active_children()
+                    _cleanup_staging_dir(staging_dir)
                 else:
-                    log_message(f"Processing: Upload - Cleaning up staging folder: {staging_dir}")
-                    shutil.rmtree(staging_dir, ignore_errors=True)
-                    log_message(f"Completed: Upload - Cleaned up staging folder: {staging_dir}")
+                    still_running = any(child.poll() is None for child in list(_active_children))
+                    if still_running or staging_keep:
+                        log_message(
+                            f"SKIPPED: Upload - Leaving staging folder in place: {staging_dir}"
+                        )
+                    else:
+                        _cleanup_staging_dir(staging_dir)
 
         if not found_any_file:
             messagebox.showerror("Error", f"No files were found under: {selected_path}")
             return
 
+        raise_if_cancelled()
         messagebox.showinfo("Info", "Upload complete.")
+    except OperationCancelled:
+        log_message("Completed: Upload - Cancelled by user, staging files removed")
+        if not _close_after_cancel:
+            try:
+                messagebox.showinfo(
+                    "Upload cancelled",
+                    "The upload was cancelled. Staging files were deleted.",
+                )
+            except tk.TclError:
+                pass
     finally:
         _busy_operation = None
-        set_upload_button_busy(False)
+        _cancel_requested = False
+        try:
+            set_upload_button_busy(False)
+        except tk.TclError:
+            pass
+        if _close_after_cancel:
+            _close_after_cancel = False
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
 
 def _insert_log_segment(widget, text):
     if not text:
@@ -1408,6 +1571,12 @@ root.geometry("1000x780")
 root.minsize(860, 600)
 
 def _on_app_close():
+    global _close_after_cancel
+    if _busy_operation == "upload":
+        log_message("Processing: Upload - Window close requested, cancelling upload")
+        _close_after_cancel = True
+        request_upload_cancel()
+        return
     if _busy_operation:
         messagebox.showwarning(
             "Busy",
@@ -1476,6 +1645,13 @@ var_encrypt_upload = tk.BooleanVar(value=True)
 ttk.Checkbutton(grp_upload_options, text="Delete on Done", variable=var_delete_on_done).pack(side=tk.LEFT, padx=12, pady=8)
 ttk.Checkbutton(grp_upload_options, text="Split Files", variable=var_split).pack(side=tk.LEFT, padx=12, pady=8)
 ttk.Checkbutton(grp_upload_options, text="Encrypt", variable=var_encrypt_upload).pack(side=tk.LEFT, padx=12, pady=8)
+button_cancel_upload = ttk.Button(
+    grp_upload_options,
+    text="Cancel",
+    command=request_upload_cancel,
+    state=tk.DISABLED,
+)
+button_cancel_upload.pack(side=tk.RIGHT, padx=(0, 12), pady=8)
 button_upload = ttk.Button(grp_upload_options, text="Upload", command=upload)
 button_upload.pack(side=tk.RIGHT, padx=12, pady=8)
 
